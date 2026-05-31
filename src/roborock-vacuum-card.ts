@@ -1,0 +1,848 @@
+import { LitElement, html, css, nothing, type PropertyValues } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
+import { styleMap } from "lit/directives/style-map.js";
+
+import type {
+  HomeAssistant,
+  VacuumConfig,
+  RoborockVacuumCardConfig,
+  RoomConfig,
+  NativeCleanAction,
+  ScriptCleanAction,
+} from "./types";
+import {
+  CARD_NAME,
+  EDITOR_NAME,
+  CARD_VERSION,
+  HOLD_DURATION_MS,
+  STATUS_MAP,
+  COLOR_HEX,
+  COLOR_BG,
+  COLOR_BG_ACTIVE,
+  CLEANING_STATES,
+} from "./const";
+
+console.info(
+  `%c ROBOROCK-VACUUM-CARD %c v${CARD_VERSION} `,
+  "background:#2196F3;color:#fff;font-weight:700;padding:2px 4px;border-radius:3px 0 0 3px",
+  "background:#1a1a1a;color:#fff;font-weight:400;padding:2px 4px;border-radius:0 3px 3px 0"
+);
+
+@customElement(CARD_NAME)
+export class RoborockVacuumCard extends LitElement {
+  @property({ attribute: false }) hass!: HomeAssistant;
+  @state() private _config!: RoborockVacuumCardConfig;
+  @state() private _activeIndex = 0;
+
+  private _holdTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // ── Lovelace card API ───────────────────────────────────────────────────
+
+  static getConfigElement(): HTMLElement {
+    return document.createElement(EDITOR_NAME);
+  }
+
+  static getStubConfig(): RoborockVacuumCardConfig {
+    return {
+      type: `custom:${CARD_NAME}`,
+      vacuums: [
+        {
+          entity: "vacuum.my_roborock",
+          name: "Roborock",
+          color: "green",
+          rooms: [],
+          clean_action: { type: "native" },
+        },
+      ],
+    };
+  }
+
+  setConfig(config: RoborockVacuumCardConfig): void {
+    if (!config.vacuums || !Array.isArray(config.vacuums) || config.vacuums.length === 0) {
+      throw new Error("[roborock-vacuum-card] 'vacuums' must be a non-empty array");
+    }
+    this._config = config;
+    // Clamp active index in case vacuums list shrank during edit
+    if (this._activeIndex >= config.vacuums.length) {
+      this._activeIndex = 0;
+    }
+  }
+
+  getCardSize(): number {
+    return 6;
+  }
+
+  // ── Lifecycle ───────────────────────────────────────────────────────────
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this._cancelHold();
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────────────────
+
+  private _vac(): VacuumConfig {
+    return this._config.vacuums[this._activeIndex];
+  }
+
+  private _color(vac: VacuumConfig): string {
+    return COLOR_HEX[vac.color ?? "green"] ?? COLOR_HEX["green"];
+  }
+
+  private _statusInfo(vac: VacuumConfig): readonly [string, string] {
+    const raw = vac.status_entity
+      ? (this.hass.states[vac.status_entity]?.state ?? "unknown")
+      : (this.hass.states[vac.entity]?.state ?? "unknown");
+    return STATUS_MAP[raw] ?? [raw, "rgba(255,255,255,0.5)"];
+  }
+
+  private _isCleaning(vac: VacuumConfig): boolean {
+    return CLEANING_STATES.has(this.hass.states[vac.entity]?.state ?? "");
+  }
+
+  private _isPaused(vac: VacuumConfig): boolean {
+    return this.hass.states[vac.entity]?.state === "paused";
+  }
+
+  private _battery(vac: VacuumConfig): number | null {
+    if (!vac.battery_entity) return null;
+    const n = parseInt(this.hass.states[vac.battery_entity]?.state ?? "");
+    return isNaN(n) ? null : n;
+  }
+
+  private _lastCleanStr(vac: VacuumConfig): string {
+    const raw = vac.last_clean_entity
+      ? this.hass.states[vac.last_clean_entity]?.state
+      : undefined;
+    if (!raw || raw === "unavailable" || raw === "unknown") return "—";
+    const d = new Date(raw);
+    const diff = Math.floor((Date.now() - d.getTime()) / 86_400_000);
+    const t = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (diff === 0) return `Today · ${t}`;
+    if (diff === 1) return `Yesterday · ${t}`;
+    return `${d.toLocaleDateString([], { day: "2-digit", month: "2-digit" })} · ${t}`;
+  }
+
+  private _progress(vac: VacuumConfig): number | null {
+    if (!vac.progress_entity) return null;
+    const n = parseInt(this.hass.states[vac.progress_entity]?.state ?? "");
+    return isNaN(n) || n === 0 ? null : n;
+  }
+
+  private _isRoomSelected(room: RoomConfig): boolean {
+    if (room.toggle_entity) {
+      return this.hass.states[room.toggle_entity]?.state === "on";
+    }
+    return false;
+  }
+
+  private _hasSelectedRooms(vac: VacuumConfig): boolean {
+    return (vac.rooms ?? []).some((r) => this._isRoomSelected(r));
+  }
+
+  private _totalCleanMins(vac: VacuumConfig): number {
+    return (vac.rooms ?? []).reduce((sum, r) => {
+      if (!this._isRoomSelected(r) || !r.clean_time_entity) return sum;
+      const t = parseFloat(this.hass.states[r.clean_time_entity]?.state ?? "0");
+      return sum + (isNaN(t) ? 0 : t);
+    }, 0);
+  }
+
+  private _roomAgeDays(room: RoomConfig): number | null {
+    if (!room.last_clean_entity) return null;
+    const raw = this.hass.states[room.last_clean_entity]?.state;
+    if (!raw || raw === "unavailable" || raw === "unknown") return null;
+    return (Date.now() - new Date(raw).getTime()) / 86_400_000;
+  }
+
+  private _roomBorderColor(room: RoomConfig): string {
+    const d = this._roomAgeDays(room);
+    if (d === null) return "rgba(255,77,77,0.8)";
+    if (d < 2) return "rgba(46,204,113,0.8)";
+    if (d < 4) return "rgba(250,173,20,0.8)";
+    if (d < 7) return "rgba(255,152,0,0.8)";
+    return "rgba(255,77,77,0.8)";
+  }
+
+  private _batIcon(pct: number): string {
+    if (pct > 80) return "mdi:battery";
+    if (pct > 50) return "mdi:battery-60";
+    if (pct > 20) return "mdi:battery-30";
+    return "mdi:battery-10";
+  }
+
+  private _batColor(pct: number): string {
+    if (pct > 50) return "#52c41a";
+    if (pct > 20) return "#faad14";
+    return "#ff4d4f";
+  }
+
+  private _mapUrl(entity: string): string {
+    return (this.hass.states[entity]?.attributes["entity_picture"] as string) ?? "";
+  }
+
+  private _timeStr(mins: number): string {
+    if (mins <= 0) return "";
+    if (mins >= 60) return `~${Math.floor(mins / 60)} h ${Math.round(mins % 60)} min`;
+    return `~${Math.round(mins)} min`;
+  }
+
+  // ── Hold-action helpers ─────────────────────────────────────────────────
+
+  private _cancelHold(): void {
+    if (this._holdTimer !== null) {
+      clearTimeout(this._holdTimer);
+      this._holdTimer = null;
+    }
+  }
+
+  /**
+   * Returns a pointerdown handler that fires `action` after HOLD_DURATION_MS.
+   * Must be paired with _holdEnd on pointerup / pointerleave / pointercancel.
+   */
+  private _holdStart(action: () => void) {
+    return (e: PointerEvent): void => {
+      e.preventDefault();
+      this._cancelHold();
+      this._holdTimer = setTimeout(() => {
+        this._holdTimer = null;
+        action();
+      }, HOLD_DURATION_MS);
+    };
+  }
+
+  private _holdEnd = (): void => {
+    this._cancelHold();
+  };
+
+  // ── Service calls ───────────────────────────────────────────────────────
+
+  private async _call(domain: string, service: string, data: Record<string, unknown>): Promise<void> {
+    try {
+      await this.hass.callService(domain, service, data);
+    } catch (err) {
+      console.error(`[roborock-vacuum-card] ${domain}.${service} failed:`, err);
+    }
+  }
+
+  private _pause(vac: VacuumConfig): void {
+    this._call("vacuum", "pause", { entity_id: vac.entity });
+  }
+
+  private _resume(vac: VacuumConfig): void {
+    this._call("vacuum", "start", { entity_id: vac.entity });
+  }
+
+  private _dock(vac: VacuumConfig): void {
+    this._call("vacuum", "return_to_base", { entity_id: vac.entity });
+  }
+
+  private _toggleRoom(room: RoomConfig): void {
+    if (room.toggle_entity) {
+      this._call("input_boolean", "toggle", { entity_id: room.toggle_entity });
+    }
+  }
+
+  private async _startClean(vac: VacuumConfig): Promise<void> {
+    if (!vac.clean_action) return;
+
+    const selected = (vac.rooms ?? []).filter((r) => this._isRoomSelected(r));
+    if (selected.length === 0) return;
+
+    if (vac.clean_action.type === "script") {
+      const action = vac.clean_action as ScriptCleanAction;
+      const variables: Record<string, unknown> = {};
+      for (const [key, template] of Object.entries(action.variables ?? {})) {
+        variables[key] = template
+          .replace("{{ entity }}", vac.entity)
+          .replace("{{ selected_segments }}", JSON.stringify(selected.map((r) => r.segment_id).filter(Boolean)))
+          .replace("{{ selected_room_keys }}", JSON.stringify(selected.map((r) => r.key)))
+          .replace("{{ selected_area_ids }}", JSON.stringify(selected.map((r) => r.area_id).filter(Boolean)));
+      }
+      await this._call("script", "turn_on", { entity_id: action.entity_id, variables });
+      return;
+    }
+
+    // Native Roborock strategy
+    const action = vac.clean_action as NativeCleanAction;
+
+    if (action.mop_mode_entity && action.mop_mode) {
+      await this._call("select", "select_option", { entity_id: action.mop_mode_entity, option: action.mop_mode });
+    }
+    if (action.mop_intensity_entity && action.mop_intensity) {
+      await this._call("select", "select_option", { entity_id: action.mop_intensity_entity, option: action.mop_intensity });
+    }
+    if (action.suction_entity && action.suction_level) {
+      await this._call("select", "select_option", { entity_id: action.suction_entity, option: action.suction_level });
+    }
+
+    const segments = selected.map((r) => r.segment_id).filter((id): id is number => id !== undefined);
+    await this._call("vacuum", "send_command", {
+      entity_id: vac.entity,
+      command: "app_segment_clean",
+      params: [{ segments, repeat: action.repeat ?? 1 }],
+    });
+  }
+
+  // ── Render helpers ──────────────────────────────────────────────────────
+
+  private _renderBadge(vac: VacuumConfig, index: number) {
+    const active = index === this._activeIndex;
+    const cleaning = this._isCleaning(vac);
+    const color = this._color(vac);
+    const colorKey = vac.color ?? "green";
+    const name = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
+
+    const bg = cleaning
+      ? COLOR_BG_ACTIVE[colorKey]
+      : active
+      ? COLOR_BG[colorKey]
+      : "rgba(30,30,30,0.85)";
+
+    const border = cleaning
+      ? `3px solid ${color}`
+      : active
+      ? `2px solid ${color}80`
+      : "2px solid rgba(255,255,255,0.18)";
+
+    const shadow = cleaning
+      ? `0 0 18px ${color}B0`
+      : active
+      ? `0 0 8px ${color}50`
+      : "none";
+
+    return html`
+      <button
+        class="badge"
+        style=${styleMap({ background: bg, border, boxShadow: shadow })}
+        @click=${() => { this._activeIndex = index; }}
+        aria-pressed=${active ? "true" : "false"}
+        aria-label=${name}
+      >
+        ${vac.image
+          ? html`<img class="badge-img" src=${vac.image} alt=${name} />`
+          : html`<ha-icon class="badge-icon" icon="mdi:robot-vacuum" style=${styleMap({ color })}></ha-icon>`}
+        <span class="badge-name" style=${styleMap({ color: active ? "white" : "rgba(255,255,255,0.55)" })}>
+          ${name}
+        </span>
+      </button>
+    `;
+  }
+
+  private _renderMap(vac: VacuumConfig) {
+    if (!vac.map) return nothing;
+    const { entity, rotation = 0, scale = 100, offset_x = 0, offset_y = 0 } = vac.map;
+    const url = this._mapUrl(entity);
+    if (!url) return nothing;
+
+    return html`
+      <div class="map-wrap">
+        <img
+          class="map-img"
+          src=${url}
+          alt="Vacuum map"
+          style=${styleMap({
+            left: `${50 + offset_x}%`,
+            top: `${50 + offset_y}%`,
+            width: `${scale}%`,
+            transform: `translate(-50%,-50%) rotate(${rotation}deg)`,
+          })}
+        />
+        ${(vac.rooms ?? []).map((r) => this._renderRoomBtn(r, vac))}
+      </div>
+    `;
+  }
+
+  private _renderRoomBtn(room: RoomConfig, vac: VacuumConfig) {
+    const selected = this._isRoomSelected(room);
+    const color = this._color(vac);
+    const border = this._roomBorderColor(room);
+    const bg = selected ? `${color}A8` : "rgba(0,0,0,0.55)";
+    const shadow = selected ? `0 0 12px ${color}80` : "none";
+
+    return html`
+      <button
+        class="room-btn"
+        style=${styleMap({
+          left: `${room.map_x}%`,
+          top: `${room.map_y}%`,
+          background: bg,
+          border: `4px solid ${border}`,
+          boxShadow: shadow,
+        })}
+        @click=${() => this._toggleRoom(room)}
+        title=${room.name}
+        aria-label=${room.name}
+        aria-pressed=${selected ? "true" : "false"}
+      >
+        <ha-icon
+          icon=${room.icon}
+          style=${styleMap({ color: selected ? "white" : "rgba(255,255,255,0.5)" })}
+        ></ha-icon>
+      </button>
+    `;
+  }
+
+  private _renderStatusRow(vac: VacuumConfig) {
+    const [label, labelColor] = this._statusInfo(vac);
+    const bat = this._battery(vac);
+    const lastClean = this._lastCleanStr(vac);
+
+    return html`
+      <div class="status-row">
+        <span class="status-label" style=${styleMap({ color: labelColor })}>${label}</span>
+        <div class="status-meta">
+          ${bat !== null ? html`
+            <div class="battery">
+              <span style=${styleMap({ color: this._batColor(bat) })}>${bat}&thinsp;%</span>
+              <ha-icon icon=${this._batIcon(bat)} style=${styleMap({ color: this._batColor(bat) })}></ha-icon>
+            </div>
+          ` : nothing}
+          <div class="last-clean">
+            <span>${lastClean}</span>
+            <ha-icon icon="mdi:history"></ha-icon>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private _renderProgress(vac: VacuumConfig) {
+    const prog = this._progress(vac);
+    if (prog === null) return nothing;
+    const color = this._color(vac);
+    return html`
+      <div class="progress">
+        <div class="progress-track">
+          <div class="progress-fill" style=${styleMap({ width: `${prog}%`, background: color })}></div>
+        </div>
+        <span class="progress-label" style=${styleMap({ color })}>${prog}&thinsp;%</span>
+      </div>
+    `;
+  }
+
+  private _renderActions(vac: VacuumConfig) {
+    const cleaning = this._isCleaning(vac);
+    const paused = this._isPaused(vac);
+    const hasRooms = this._hasSelectedRooms(vac);
+    const color = this._color(vac);
+    const colorKey = vac.color ?? "green";
+    const mins = this._totalCleanMins(vac);
+    const timeStr = this._timeStr(mins);
+
+    // ── Paused state ──────────────────────────────────────────────────
+    if (paused) {
+      return html`
+        <div class="actions">
+          <button
+            class="action-btn"
+            style=${styleMap({ background: COLOR_BG[colorKey], border: `1px solid ${color}80` })}
+            @pointerdown=${this._holdStart(() => this._resume(vac))}
+            @pointerup=${this._holdEnd}
+            @pointerleave=${this._holdEnd}
+            @pointercancel=${this._holdEnd}
+          >
+            <ha-icon icon="mdi:play" style=${styleMap({ color })}></ha-icon>
+            <span>Resume</span>
+          </button>
+          <button
+            class="action-btn action-btn--secondary"
+            @click=${() => this._dock(vac)}
+          >
+            <ha-icon icon="mdi:home" style="color:rgba(64,169,255,0.6)"></ha-icon>
+            <span>Dock</span>
+          </button>
+        </div>
+      `;
+    }
+
+    // ── Cleaning state ────────────────────────────────────────────────
+    if (cleaning) {
+      return html`
+        <div class="actions">
+          <button
+            class="action-btn action-btn--warn"
+            @pointerdown=${this._holdStart(() => this._pause(vac))}
+            @pointerup=${this._holdEnd}
+            @pointerleave=${this._holdEnd}
+            @pointercancel=${this._holdEnd}
+          >
+            <ha-icon icon="mdi:pause" style="color:#faad14"></ha-icon>
+            <span>Pause</span>
+          </button>
+        </div>
+      `;
+    }
+
+    // ── Idle state ────────────────────────────────────────────────────
+    const startBg = hasRooms ? COLOR_BG[colorKey] : "rgba(60,60,60,0.4)";
+    const startBorder = hasRooms ? `1px solid ${color}80` : "1px solid rgba(255,255,255,0.1)";
+    const startIconColor = hasRooms ? color : "rgba(255,255,255,0.2)";
+    const startTextColor = hasRooms ? "white" : "rgba(255,255,255,0.25)";
+
+    return html`
+      <div class="actions">
+        <button
+          class="action-btn"
+          style=${styleMap({ background: startBg, border: startBorder })}
+          ?disabled=${!hasRooms}
+          @pointerdown=${hasRooms ? this._holdStart(() => this._startClean(vac)) : nothing}
+          @pointerup=${this._holdEnd}
+          @pointerleave=${this._holdEnd}
+          @pointercancel=${this._holdEnd}
+        >
+          <ha-icon icon="mdi:rocket-launch" style=${styleMap({ color: startIconColor })}></ha-icon>
+          <div class="start-body">
+            <span style=${styleMap({ color: startTextColor })}>START</span>
+            ${timeStr
+              ? html`<small style="color:rgba(255,255,255,0.4)">${timeStr}</small>`
+              : nothing}
+          </div>
+        </button>
+      </div>
+    `;
+  }
+
+  private _renderStatusCard(vac: VacuumConfig) {
+    const cleaning = this._isCleaning(vac);
+    const color = this._color(vac);
+    const colorKey = vac.color ?? "green";
+    const name = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
+
+    const cardBorder = cleaning
+      ? `2px solid ${color}`
+      : "1px solid rgba(255,255,255,0.08)";
+    const cardShadow = cleaning ? `0 0 22px ${color}40` : "none";
+    const imgFilter = cleaning
+      ? `drop-shadow(0 0 20px ${color}D8)`
+      : `drop-shadow(0 4px 12px ${color}33)`;
+
+    return html`
+      <div
+        class="status-card"
+        style=${styleMap({ border: cardBorder, boxShadow: cardShadow })}
+      >
+        <div class="status-left">
+          <div class="model-label">${name}</div>
+          ${vac.image ? html`
+            <img
+              class="vac-img"
+              src=${vac.image}
+              alt=${name}
+              style=${styleMap({
+                opacity: cleaning ? "0.9" : "0.6",
+                filter: imgFilter,
+              })}
+            />
+          ` : html`
+            <ha-icon
+              icon="mdi:robot-vacuum"
+              style=${styleMap({ color, fontSize: "80px", opacity: cleaning ? "0.9" : "0.5" })}
+            ></ha-icon>
+          `}
+        </div>
+
+        <div class="status-right">
+          ${this._renderStatusRow(vac)}
+          ${this._renderProgress(vac)}
+          ${this._renderActions(vac)}
+        </div>
+      </div>
+    `;
+  }
+
+  // ── Main render ─────────────────────────────────────────────────────────
+
+  render() {
+    if (!this._config || !this.hass) return nothing;
+    const vac = this._vac();
+    if (!vac) return nothing;
+
+    return html`
+      <ha-card>
+        <div class="badges-row">
+          ${this._config.vacuums.map((v, i) => this._renderBadge(v, i))}
+        </div>
+        ${this._renderMap(vac)}
+        ${this._renderStatusCard(vac)}
+      </ha-card>
+    `;
+  }
+
+  // ── Styles ──────────────────────────────────────────────────────────────
+
+  static styles = css`
+    ha-card {
+      background: transparent;
+      border: none;
+      box-shadow: none;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    /* ── Badges ────────────────────────────────────────────────────── */
+    .badges-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .badge {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 18px 6px 6px;
+      border-radius: 99px;
+      cursor: pointer;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      transition: background 0.3s, border 0.3s, box-shadow 0.3s;
+    }
+
+    .badge-img {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+
+    .badge-icon {
+      width: 44px;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .badge-name {
+      font-size: 15px;
+      font-weight: 700;
+      white-space: nowrap;
+      transition: color 0.3s;
+    }
+
+    /* ── Map ────────────────────────────────────────────────────────── */
+    .map-wrap {
+      position: relative;
+      width: 100%;
+      /* 16:4.4 aspect ratio matching the SVG placeholder */
+      padding-top: 27.5%;
+      overflow: hidden;
+      border-radius: 12px;
+    }
+
+    .map-img {
+      position: absolute;
+      transform-origin: center center;
+      object-fit: cover;
+    }
+
+    /* ── Room buttons ───────────────────────────────────────────────── */
+    .room-btn {
+      position: absolute;
+      width: 46px;
+      height: 46px;
+      border-radius: 12px;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transform: translate(-50%, -50%);
+      transition: background 0.2s, box-shadow 0.2s;
+    }
+
+    .room-btn ha-icon {
+      --mdc-icon-size: 22px;
+    }
+
+    /* ── Status card ────────────────────────────────────────────────── */
+    .status-card {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      grid-template-rows: auto;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-radius: 20px;
+      overflow: hidden;
+      transition: border 0.4s, box-shadow 0.4s;
+    }
+
+    .status-left {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 4px 0 0;
+    }
+
+    .model-label {
+      font-size: 10px;
+      letter-spacing: 3px;
+      color: rgba(255, 255, 255, 0.3);
+      text-transform: uppercase;
+      text-align: center;
+      margin-bottom: -10px;
+    }
+
+    .vac-img {
+      width: 110%;
+      margin-bottom: -15px;
+      object-fit: contain;
+      display: block;
+      transition: opacity 0.5s, filter 0.5s;
+    }
+
+    .status-right {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    /* ── Status row ─────────────────────────────────────────────────── */
+    .status-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      padding: 8px 12px 4px 16px;
+    }
+
+    .status-label {
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .status-meta {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+
+    .battery {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .battery ha-icon {
+      --mdc-icon-size: 15px;
+    }
+
+    .last-clean {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.45);
+    }
+
+    .last-clean ha-icon {
+      --mdc-icon-size: 12px;
+      color: rgba(255, 255, 255, 0.25);
+    }
+
+    /* ── Progress bar ───────────────────────────────────────────────── */
+    .progress {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 16px 4px;
+    }
+
+    .progress-track {
+      flex: 1;
+      height: 3px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width 0.5s ease;
+    }
+
+    .progress-label {
+      font-size: 11px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    /* ── Action buttons ─────────────────────────────────────────────── */
+    .actions {
+      display: flex;
+      gap: 8px;
+      padding: 0 12px 14px;
+    }
+
+    .action-btn {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 14px;
+      cursor: pointer;
+      transition: opacity 0.2s;
+      font-family: inherit;
+    }
+
+    .action-btn:disabled {
+      cursor: default;
+      opacity: 0.7;
+    }
+
+    .action-btn ha-icon {
+      --mdc-icon-size: 22px;
+      flex-shrink: 0;
+    }
+
+    .action-btn span {
+      font-size: 14px;
+      font-weight: 700;
+      color: white;
+    }
+
+    .action-btn--secondary {
+      background: rgba(64, 169, 255, 0.08);
+      border: 1px solid rgba(64, 169, 255, 0.2) !important;
+    }
+
+    .action-btn--warn {
+      background: rgba(250, 173, 20, 0.18);
+      border: 1px solid rgba(250, 173, 20, 0.5) !important;
+    }
+
+    .start-body {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2px;
+    }
+
+    .start-body small {
+      font-size: 10px;
+    }
+  `;
+}
+
+// Register with Lovelace custom card registry
+(window as Window & { customCards?: Array<Record<string, unknown>> }).customCards ??= [];
+(window as Window & { customCards?: Array<Record<string, unknown>> }).customCards!.push({
+  type: CARD_NAME,
+  name: "Roborock Vacuum Card",
+  description: "Feature-rich card for Roborock vacuums — map, room selection, multi-vacuum tabs.",
+  preview: false,
+  documentationURL: "https://github.com/Michailjovic/Vacuum-card",
+});

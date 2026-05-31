@@ -1,0 +1,22 @@
+{
+  "name": "roborock-vacuum-card",
+  "version": "0.2.0",
+  "description": "Feature-rich Lovelace card for Roborock vacuums",
+  "keywords": ["home-assistant", "lovelace", "card", "roborock", "vacuum", "hacs"],
+  "license": "MIT",
+  "scripts": {
+    "build": "rollup -c rollup.config.mjs",
+    "watch": "rollup -c rollup.config.mjs --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-typescript": "^11.1.6",
+    "rollup": "^4.18.0",
+    "tslib": "^2.6.3",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "lit": "^3.1.4"
+  }
+}

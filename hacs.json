@@ -1,0 +1,7 @@
+{
+  "name": "Roborock Vacuum Card",
+  "description": "Feature-rich Lovelace card for Roborock vacuums — map overlay, room selection, multi-vacuum tabs, and flexible clean actions.",
+  "render_readme": true,
+  "homeassistant": "2024.1.0",
+  "filename": "roborock-vacuum-card.js"
+}
