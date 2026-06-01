@@ -49,6 +49,8 @@ export interface RoomConfig {
   map_w?: number;                    // šířka % → aktivuje rectangle mód
   map_h?: number;                    // výška %
   thresholds?: RoomThreshold[];      // vlastní thresholds pro barvu borderu
+  border_normal?: number;            // šířka borderu (nevybráno), default 2
+  border_selected?: number;          // šířka borderu (vybráno), default 4
 }
 
 // ── Clean action strategies ───────────────────────────────────────────────

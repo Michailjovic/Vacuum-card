@@ -636,12 +636,71 @@ export class RoborockVacuumCardEditor extends LitElement {
           <div class="sub-title" style="margin-top:8px">Rectangle mód (volitelné)</div>
           <p class="hint">Pokud nastavíš šířku a výšku, místnost se zobrazí jako obdélník.<br>
             map_x/y = střed obdélníku. Bez nastavení = klasické tlačítko.</p>
-          ${this._numberSlider("Šířka (map_w)", room.map_w ?? 0, 0, 80, 1,
+          ${this._numberSlider("Šířka (map_w)", room.map_w ?? 0, 0, 100, 1,
             v => this._setRoom(vacIdx, roomIdx, { map_w: v > 0 ? v : undefined }), "%")}
-          ${this._numberSlider("Výška (map_h)", room.map_h ?? 0, 0, 80, 1,
+          ${this._numberSlider("Výška (map_h)", room.map_h ?? 0, 0, 100, 1,
             v => this._setRoom(vacIdx, roomIdx, { map_h: v > 0 ? v : undefined }), "%")}
+          ${this._numberSlider("Border (nevybráno)", room.border_normal ?? 2, 0, 12, 1,
+            v => this._setRoom(vacIdx, roomIdx, { border_normal: v }), "px")}
+          ${this._numberSlider("Border (vybráno)", room.border_selected ?? 4, 0, 12, 1,
+            v => this._setRoom(vacIdx, roomIdx, { border_selected: v }), "px")}
+        </div>
+
+        <div class="section"><div class="section-title">Thresholds (barva borderu)</div>
+          <p class="hint">Border mění barvu podle počtu dní od posledního úklidu.<br>
+            Pravidla se řadí vzestupně — první splněné pravidlo vyhraje.</p>
+          ${this._renderThresholdEditor(vacIdx, roomIdx, room)}
         </div>
       </div>`;
+  }
+
+  private _renderThresholdEditor(vacIdx: number, roomIdx: number, room: RoomConfig) {
+    const defaults = [
+      { days: 2, color: "#52c41a" },
+      { days: 5, color: "#faad14" },
+      { days: 10, color: "#ff4d4f" },
+    ];
+    const ths = room.thresholds ?? defaults;
+    return html`
+      ${ths.map((th, ti) => html`
+        <div class="var-row threshold-row">
+          <span class="threshold-label">≤</span>
+          <input type="number" class="text-input text-input--sm threshold-days"
+            min="0" max="365" .value=${String(th.days)}
+            @change=${(e: Event) => {
+              const days = parseInt((e.target as HTMLInputElement).value);
+              const next = ths.map((t, i) => i === ti ? { ...t, days: isNaN(days) ? t.days : days } : t);
+              this._setRoom(vacIdx, roomIdx, { thresholds: next });
+            }} />
+          <span class="threshold-label">dní</span>
+          <input type="color" class="threshold-color" .value=${th.color}
+            @input=${(e: Event) => {
+              const color = (e.target as HTMLInputElement).value;
+              const next = ths.map((t, i) => i === ti ? { ...t, color } : t);
+              this._setRoom(vacIdx, roomIdx, { thresholds: next });
+            }} />
+          <button class="icon-btn icon-btn--danger icon-btn--sm"
+            @click=${() => {
+              const next = ths.filter((_, i) => i !== ti);
+              this._setRoom(vacIdx, roomIdx, { thresholds: next.length ? next : undefined });
+            }}>
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
+        </div>
+      `)}
+      <button class="btn btn--add btn--sm" @click=${() => {
+        const next = [...ths, { days: 14, color: "#ff4d4f" }];
+        this._setRoom(vacIdx, roomIdx, { thresholds: next });
+      }}>
+        <ha-icon icon="mdi:plus"></ha-icon> Přidat threshold
+      </button>
+      ${room.thresholds ? html`
+        <button class="btn btn--sm" style="margin-left:4px" @click=${() =>
+          this._setRoom(vacIdx, roomIdx, { thresholds: undefined })}>
+          Reset na výchozí
+        </button>
+      ` : nothing}
+    `;
   }
 
   // ── View: global action editor ───────────────────────────────────────────
@@ -856,6 +915,15 @@ export class RoborockVacuumCardEditor extends LitElement {
     .anchor-cell--active {
       background:var(--primary-color); color:white;
       border-color:var(--primary-color);
+    }
+
+    .threshold-row { align-items:center; gap:6px; }
+    .threshold-label { font-size:12px; color:var(--secondary-text-color); flex-shrink:0; }
+    .threshold-days { width:56px !important; flex:none; padding:6px 8px; }
+    .threshold-color {
+      width:36px; height:28px; padding:2px; border-radius:6px;
+      border:1px solid var(--divider-color,rgba(0,0,0,.2));
+      background:var(--card-background-color); cursor:pointer;
     }
   `;
 }

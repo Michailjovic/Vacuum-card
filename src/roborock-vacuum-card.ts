@@ -478,7 +478,9 @@ export class RoborockVacuumCard extends LitElement {
         bl: ["flex-start","flex-end"],   b:  ["center","flex-end"],   br: ["flex-end","flex-end"],
       };
       const [jc, ai] = ANCHOR[anchor] ?? ["center", "center"];
-      const borderW = selected ? "4px" : "2px";
+      const borderW = (selected
+        ? (room.border_selected ?? 4)
+        : (room.border_normal ?? 2)) + "px";
       const borderC = selected ? color + "E0" : ageColor;
       const bg = selected ? color + "44" : "rgba(0,0,0,0.06)";
       const shadow = selected ? "0 0 18px " + color + "60" : "none";
