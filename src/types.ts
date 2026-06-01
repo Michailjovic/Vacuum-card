@@ -47,9 +47,6 @@ export interface RoomConfig {
   map_y: number;
   map_w?: number;                    // šířka % → aktivuje rectangle mód
   map_h?: number;                    // výška %
-  thresholds?: RoomThreshold[];      // vlastní thresholds pro barvu borderu
-  border_normal?: number;            // šířka borderu (nevybráno), default 2
-  border_selected?: number;          // šířka borderu (vybráno), default 4
 }
 
 // ── Clean action strategies ───────────────────────────────────────────────
@@ -128,6 +125,9 @@ export interface VacuumConfig {
   clean_action?: CleanAction;
   current_room_entity?: string;
   error_entity?: string;
+  room_thresholds?: RoomThreshold[];  // sdílené thresholds pro všechny místnosti
+  room_border_normal?: number;        // šířka borderu overlay (nevybráno), default 2
+  room_border_selected?: number;      // šířka borderu overlay (vybráno), default 4
 }
 
 export interface RoborockVacuumCardConfig {

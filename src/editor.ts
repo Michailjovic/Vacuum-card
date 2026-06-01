@@ -398,6 +398,17 @@ export class RoborockVacuumCardEditor extends LitElement {
             <ha-icon icon="mdi:plus"></ha-icon> Add room
           </button>
         </div>
+
+        <div class="section"><div class="section-title">Vzhled místností</div>
+          <p class="hint">Sdílené nastavení pro všechny místnosti tohoto vysavače.</p>
+          ${this._numberSlider("Border (nevybráno)", vac.room_border_normal ?? 2, 0, 12, 1,
+            v => this._setVacuum(idx, { room_border_normal: v }), "px")}
+          ${this._numberSlider("Border (vybráno)", vac.room_border_selected ?? 4, 0, 12, 1,
+            v => this._setVacuum(idx, { room_border_selected: v }), "px")}
+          <div class="sub-title" style="margin-top:8px">Thresholds (barva borderu dle stáří úklidu)</div>
+          <p class="hint">Pravidla vzestupně — první splněné vyhraje. Nad posledním = červená.</p>
+          ${this._renderVacThresholdEditor(idx, vac)}
+        </div>
       </div>`;
   }
 
@@ -634,31 +645,32 @@ export class RoborockVacuumCardEditor extends LitElement {
           <div class="sub-title" style="margin-top:8px">Rectangle mód (volitelné)</div>
           <p class="hint">Pokud nastavíš šířku a výšku, místnost se zobrazí jako obdélník.<br>
             map_x/y = střed obdélníku. Bez nastavení = klasické tlačítko.</p>
-          ${this._numberSlider("Šířka (map_w)", room.map_w ?? 0, 0, 100, 1,
-            v => this._setRoom(vacIdx, roomIdx, { map_w: v > 0 ? v : undefined }), "%")}
-          ${this._numberSlider("Výška (map_h)", room.map_h ?? 0, 0, 100, 1,
-            v => this._setRoom(vacIdx, roomIdx, { map_h: v > 0 ? v : undefined }), "%")}
-          ${this._numberSlider("Border (nevybráno)", room.border_normal ?? 2, 0, 12, 1,
-            v => this._setRoom(vacIdx, roomIdx, { border_normal: v }), "px")}
-          ${this._numberSlider("Border (vybráno)", room.border_selected ?? 4, 0, 12, 1,
-            v => this._setRoom(vacIdx, roomIdx, { border_selected: v }), "px")}
-        </div>
-
-        <div class="section"><div class="section-title">Thresholds (barva borderu)</div>
-          <p class="hint">Border mění barvu podle počtu dní od posledního úklidu.<br>
-            Pravidla se řadí vzestupně — první splněné pravidlo vyhraje.</p>
-          ${this._renderThresholdEditor(vacIdx, roomIdx, room)}
+          ${room.map_w !== undefined && room.map_h !== undefined ? html`
+            ${this._numberSlider("Šířka", room.map_w, 1, 100, 1,
+              v => this._setRoom(vacIdx, roomIdx, { map_w: v }), "%")}
+            ${this._numberSlider("Výška", room.map_h, 1, 100, 1,
+              v => this._setRoom(vacIdx, roomIdx, { map_h: v }), "%")}
+            <button class="btn btn--sm" style="align-self:flex-start"
+              @click=${() => this._setRoom(vacIdx, roomIdx, { map_w: undefined, map_h: undefined })}>
+              Přepnout na bod
+            </button>
+          ` : html`
+            <button class="btn btn--add btn--sm" style="align-self:flex-start"
+              @click=${() => this._setRoom(vacIdx, roomIdx, { map_w: 20, map_h: 15 })}>
+              <ha-icon icon="mdi:rectangle-outline"></ha-icon> Použít rectangle overlay
+            </button>
+          `}
         </div>
       </div>`;
   }
 
-  private _renderThresholdEditor(vacIdx: number, roomIdx: number, room: RoomConfig) {
+  private _renderVacThresholdEditor(vacIdx: number, vac: VacuumConfig) {
     const defaults = [
       { days: 2, color: "#52c41a" },
       { days: 5, color: "#faad14" },
       { days: 10, color: "#ff4d4f" },
     ];
-    const ths = room.thresholds ?? defaults;
+    const ths = vac.room_thresholds ?? defaults;
     return html`
       ${ths.map((th, ti) => html`
         <div class="var-row threshold-row">
@@ -668,35 +680,31 @@ export class RoborockVacuumCardEditor extends LitElement {
             @change=${(e: Event) => {
               const days = parseInt((e.target as HTMLInputElement).value);
               const next = ths.map((t, i) => i === ti ? { ...t, days: isNaN(days) ? t.days : days } : t);
-              this._setRoom(vacIdx, roomIdx, { thresholds: next });
+              this._setVacuum(vacIdx, { room_thresholds: next });
             }} />
           <span class="threshold-label">dní</span>
           <input type="color" class="threshold-color" .value=${th.color}
             @input=${(e: Event) => {
               const color = (e.target as HTMLInputElement).value;
               const next = ths.map((t, i) => i === ti ? { ...t, color } : t);
-              this._setRoom(vacIdx, roomIdx, { thresholds: next });
+              this._setVacuum(vacIdx, { room_thresholds: next });
             }} />
           <button class="icon-btn icon-btn--danger icon-btn--sm"
             @click=${() => {
               const next = ths.filter((_, i) => i !== ti);
-              this._setRoom(vacIdx, roomIdx, { thresholds: next.length ? next : undefined });
+              this._setVacuum(vacIdx, { room_thresholds: next.length ? next : undefined });
             }}>
             <ha-icon icon="mdi:close"></ha-icon>
           </button>
-        </div>
-      `)}
-      <button class="btn btn--add btn--sm" @click=${() => {
-        const next = [...ths, { days: 14, color: "#ff4d4f" }];
-        this._setRoom(vacIdx, roomIdx, { thresholds: next });
-      }}>
-        <ha-icon icon="mdi:plus"></ha-icon> Přidat threshold
+        </div>`
+      )}
+      <button class="btn btn--add btn--sm" @click=${() =>
+        this._setVacuum(vacIdx, { room_thresholds: [...ths, { days: 14, color: "#ff4d4f" }] })}>
+        <ha-icon icon="mdi:plus"></ha-icon> Přidat
       </button>
-      ${room.thresholds ? html`
+      ${vac.room_thresholds ? html`
         <button class="btn btn--sm" style="margin-left:4px" @click=${() =>
-          this._setRoom(vacIdx, roomIdx, { thresholds: undefined })}>
-          Reset na výchozí
-        </button>
+          this._setVacuum(vacIdx, { room_thresholds: undefined })}>Reset</button>
       ` : nothing}
     `;
   }

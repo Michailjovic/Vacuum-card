@@ -207,10 +207,10 @@ export class RoborockVacuumCard extends LitElement {
     return (Date.now() - new Date(raw).getTime()) / 86_400_000;
   }
 
-  private _roomBorderColor(room: RoomConfig): string {
+  private _roomBorderColor(room: RoomConfig, vac: VacuumConfig): string {
     const d = this._roomAgeDays(room);
     if (d === null) return "rgba(255,77,77,0.85)";
-    const ths: RoomThreshold[] = room.thresholds ?? [
+    const ths: RoomThreshold[] = vac.room_thresholds ?? [
       { days: 2, color: "rgba(46,204,113,0.85)" },
       { days: 5, color: "rgba(250,173,20,0.85)" },
       { days: 10, color: "rgba(255,152,0,0.85)" },
@@ -234,7 +234,13 @@ export class RoborockVacuumCard extends LitElement {
   }
 
   private _mapUrl(entity: string): string {
-    return (this.hass.states[entity]?.attributes["entity_picture"] as string) ?? "";
+    const state = this.hass.states[entity];
+    if (!state) return "";
+    const pic = state.attributes["entity_picture"] as string;
+    if (!pic) return "";
+    const ts = new Date(state.last_updated).getTime();
+    const sep = pic.includes("?") ? "&" : "?";
+    return this.hass.hassUrl(pic + sep + "_t=" + ts);
   }
 
   private _timeStr(mins: number): string {
@@ -576,7 +582,7 @@ export class RoborockVacuumCard extends LitElement {
   private _renderRoomOverlay(room: RoomConfig, vac: VacuumConfig) {
     const selected = this._isRoomSelected(room, vac);
     const color = this._color(vac);
-    const ageColor = this._roomBorderColor(room);
+    const ageColor = this._roomBorderColor(room, vac);
     const anchor = room.icon_anchor ?? "c";
 
     if (room.map_w !== undefined && room.map_h !== undefined) {
@@ -588,8 +594,8 @@ export class RoborockVacuumCard extends LitElement {
       };
       const [jc, ai] = ANCHOR[anchor] ?? ["center", "center"];
       const borderW = (selected
-        ? (room.border_selected ?? 4)
-        : (room.border_normal ?? 2)) + "px";
+        ? (vac.room_border_selected ?? 4)
+        : (vac.room_border_normal ?? 2)) + "px";
       const borderC = selected ? color + "E0" : ageColor;
       const bg = selected ? color + "44" : "rgba(0,0,0,0.06)";
       const shadow = selected ? "0 0 18px " + color + "60" : "none";
