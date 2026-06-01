@@ -71,8 +71,14 @@ export class RoborockVacuumCardEditor extends LitElement {
   @state() private _mapVac  = 0;
   @state() private _mapRoom: number | null = null;
 
+  private _initialized = false;
+
   setConfig(config: RoborockVacuumCardConfig): void {
     this._config = config;
+    if (!this._initialized) {
+      this._initialized = true;
+      this._openVac = new Set(config.vacuums.map((_, i) => i));
+    }
   }
 
   protected updated(changed: PropertyValues): void {
@@ -87,6 +93,14 @@ export class RoborockVacuumCardEditor extends LitElement {
   }
 
   // ── Config helpers ────────────────────────────────────────────────────────
+
+  private _logCleanNow(entityId: string): void {
+    const dt = new Date().toISOString().replace("T", " ").slice(0, 19);
+    this.hass.callService("input_datetime", "set_datetime", {
+      entity_id: entityId,
+      datetime: dt,
+    }).catch((e: unknown) => console.error("[editor] log clean now failed:", e));
+  }
 
   private _fire(config: RoborockVacuumCardConfig): void {
     this.dispatchEvent(new CustomEvent("config-changed", {
@@ -574,10 +588,21 @@ export class RoborockVacuumCardEditor extends LitElement {
                 }} />
             </div>
             <p class="hint">Find IDs: Developer Tools → Actions → roborock.get_maps</p>
-            ${this._numberSlider("Est. clean time", room.clean_time_mins ?? 0, 0, 120, 1,
+            ${this._numberSlider("Est. clean time (fallback)", room.clean_time_mins ?? 0, 0, 120, 1,
               v => this._setRoom(vacIdx, roomIdx, { clean_time_mins: v > 0 ? v : undefined }), " min")}
+            ${this._entityPicker("Auto-calibration (input_number)", room.clean_time_entity, ["input_number"],
+              v => this._setRoom(vacIdx, roomIdx, { clean_time_entity: v || undefined }))}
+            ${room.clean_time_entity ? html`
+              <p class="hint">Card measures actual room time and writes rolling average here automatically.</p>
+            ` : nothing}
             ${this._entityPicker("Last clean (input_datetime)", room.last_clean_entity, ["input_datetime"],
               v => this._setRoom(vacIdx, roomIdx, { last_clean_entity: v || undefined }))}
+            ${room.last_clean_entity ? html`
+              <button class="btn btn--sm" style="align-self:flex-start"
+                @click=${() => this._logCleanNow(room.last_clean_entity!)}>
+                ✓ Log clean now
+              </button>
+            ` : nothing}
             <p class="hint map-hint" @click=${() => { this._tab = "maps"; this._mapVac = vacIdx; this._mapRoom = roomIdx; }}>
               📍 Set position in the <strong>Maps tab</strong> →
             </p>
@@ -663,12 +688,10 @@ export class RoborockVacuumCardEditor extends LitElement {
             </div>
 
             ${this._mapRoom !== null ? html`
-              <div class="two-col">
-                ${this._numberSlider("X", rooms[this._mapRoom]?.map_x ?? 50, 0, 100, 1,
-                  v => this._setRoom(mapVac, this._mapRoom!, { map_x: v }), "%")}
-                ${this._numberSlider("Y", rooms[this._mapRoom]?.map_y ?? 50, 0, 100, 1,
-                  v => this._setRoom(mapVac, this._mapRoom!, { map_y: v }), "%")}
-              </div>
+              ${this._numberSlider("X", rooms[this._mapRoom]?.map_x ?? 50, 0, 100, 1,
+                v => this._setRoom(mapVac, this._mapRoom!, { map_x: v }), "%")}
+              ${this._numberSlider("Y", rooms[this._mapRoom]?.map_y ?? 50, 0, 100, 1,
+                v => this._setRoom(mapVac, this._mapRoom!, { map_y: v }), "%")}
               ${(() => {
                 const room = rooms[this._mapRoom!];
                 return room?.map_w !== undefined ? html`
@@ -712,6 +735,15 @@ export class RoborockVacuumCardEditor extends LitElement {
 
         <div class="section-title" style="margin-top:4px">Room appearance</div>
         <p class="hint">Applies to all vacuums.</p>
+        <div class="field field--row">
+          <label>Hide room icons</label>
+          <label class="toggle-wrap">
+            <input type="checkbox" class="toggle-input"
+              .checked=${this._config.room_icon_hidden ?? false}
+              @change=${(e: Event) => this._setConfig({ room_icon_hidden: (e.target as HTMLInputElement).checked || undefined })} />
+            <span class="toggle-track"></span>
+          </label>
+        </div>
         ${this._numberSlider("Border (idle)",     this._config.room_border_normal   ?? 2, 0, 12, 1,
           v => this._setConfig({ room_border_normal: v }), "px")}
         ${this._numberSlider("Border (selected)", this._config.room_border_selected ?? 4, 0, 12, 1,
@@ -927,140 +959,22 @@ export class RoborockVacuumCardEditor extends LitElement {
       border-top:1px solid var(--divider-color,rgba(0,0,0,.1));
     }
 
+    /* ── Toggle switch ── */
+    .toggle-wrap { position:relative; display:inline-flex; align-items:center; cursor:pointer; }
+    .toggle-input { position:absolute; opacity:0; width:0; height:0; }
+    .toggle-track {
+      width:36px; height:20px; border-radius:10px;
+      background:var(--divider-color,rgba(0,0,0,.2)); transition:background .2s; position:relative;
+    }
+    .toggle-track::after {
+      content:""; position:absolute; top:2px; left:2px;
+      width:16px; height:16px; border-radius:50%; background:white; transition:transform .2s;
+    }
+    .toggle-input:checked + .toggle-track { background:var(--primary-color); }
+    .toggle-input:checked + .toggle-track::after { transform:translateX(16px); }
+
     /* ── Map hint link ── */
     .map-hint {
-      cursor:pointer; color:var(--primary-color) !important;
-      text-decoration:underline; text-underline-offset:2px;
-    }
-    .map-hint:hover { opacity:.8; }
-
-    /* ── Pill rows (Maps tab vacuum/room selectors) ── */
-    .pill-row { display:flex; gap:6px; flex-wrap:wrap; }
-    .vac-pill {
-      padding:5px 12px; border-radius:20px; font-size:12px; font-weight:600; cursor:pointer;
-      border:1px solid var(--divider-color,rgba(0,0,0,.15));
-      background:var(--secondary-background-color); color:var(--secondary-text-color);
-      font-family:inherit;
-    }
-    .vac-pill--active { background:var(--primary-color); color:white; border-color:var(--primary-color); }
-    .room-pill {
-      display:flex; align-items:center; gap:4px;
-      padding:4px 10px; border-radius:16px; font-size:12px; font-weight:500; cursor:pointer;
-      border:1px solid var(--divider-color,rgba(0,0,0,.15));
-      background:var(--secondary-background-color); color:var(--secondary-text-color);
-      font-family:inherit;
-    }
-    .room-pill--active { background:rgba(33,150,243,.12); color:var(--primary-color); border-color:var(--primary-color); }
-
-    /* ── Map preview ── */
-    .map-pos-container { border-radius:8px; overflow:hidden; }
-    .map-pos-container--active { cursor:crosshair; }
-    .map-preview-wrap {
-      position:relative; width:100%; padding-top:27.5%;
-      overflow:hidden; border-radius:8px; background:rgba(0,0,0,.06);
-    }
-    .map-preview-img { position:absolute; transform-origin:center center; object-fit:cover; }
-
-    .pos-dot {
-      position:absolute; transform:translate(-50%,-50%);
-      width:26px; height:26px; border-radius:6px;
-      background:rgba(0,0,0,.55); border:2px solid rgba(255,255,255,.4);
-      display:flex; align-items:center; justify-content:center;
-      color:rgba(255,255,255,.7); cursor:pointer;
-    }
-    .pos-dot--active { background:rgba(33,150,243,.75); border-color:#2196F3; color:white; }
-
-    .two-col { display:flex; gap:8px; }
-    .two-col > * { flex:1; min-width:0; }
-
-    /* ── Section title ── */
-    .section-title {
-      font-size:12px; font-weight:700; letter-spacing:.8px;
-      text-transform:uppercase; color:var(--primary-color);
-      border-bottom:1px solid var(--divider-color,rgba(0,0,0,.12));
-      padding-bottom:4px; margin-bottom:2px;
-    }
-    .sub-section {
-      display:flex; flex-direction:column; gap:8px;
-      padding-left:8px; border-left:3px solid var(--divider-color,rgba(0,0,0,.1));
-    }
-    .sub-title { font-size:11px; font-weight:600; color:var(--secondary-text-color); margin-top:4px; }
-
-    /* ── Fields ── */
-    .field { display:flex; flex-direction:column; gap:4px; }
-    .field--row { flex-direction:row; align-items:center; }
-    .field--row label { width:130px; flex-shrink:0; }
-    label { font-size:13px; color:var(--secondary-text-color); }
-    .required { color:var(--error-color,#f44336); }
-
-    .text-input {
-      width:100%; box-sizing:border-box; padding:8px 10px;
-      border:1px solid var(--divider-color,rgba(0,0,0,.2)); border-radius:6px;
-      background:var(--card-background-color); color:var(--primary-text-color);
-      font-size:13px; font-family:inherit;
-    }
-    .text-input--sm   { width:auto; flex:1; }
-    .text-input--half { flex:1; min-width:0; }
-
-    .select-input {
-      flex:1; padding:6px 8px;
-      border:1px solid var(--divider-color,rgba(0,0,0,.2)); border-radius:6px;
-      background:var(--card-background-color); color:var(--primary-text-color);
-      font-size:13px; font-family:inherit; cursor:pointer;
-    }
-
-    .slider-wrap { display:flex; align-items:center; gap:8px; flex:1; }
-    .slider { flex:1; accent-color:var(--primary-color); }
-    .slider-val { width:52px; text-align:right; font-size:13px; font-weight:600; color:var(--primary-color); flex-shrink:0; }
-
-    /* ── Buttons ── */
-    .btn {
-      display:flex; align-items:center; gap:6px;
-      padding:8px 14px; border-radius:8px;
-      cursor:pointer; font-size:13px; font-weight:600; font-family:inherit; border:none;
-    }
-    .btn--add {
-      background:rgba(33,150,243,.1); color:var(--primary-color);
-      border:1px dashed var(--primary-color) !important;
-    }
-    .btn--sm { padding:4px 10px; font-size:12px; }
-
-    .icon-btn {
-      display:flex; align-items:center; justify-content:center;
-      width:32px; height:32px; border-radius:6px;
-      cursor:pointer; background:transparent; border:none; color:var(--secondary-text-color);
-      flex-shrink:0;
-    }
-    .icon-btn:hover { background:rgba(0,0,0,.08); }
-    .icon-btn:disabled { opacity:.35; cursor:default; }
-    .icon-btn--danger { color:var(--error-color,#f44336); }
-    .icon-btn--sm { width:24px; height:24px; }
-
-    /* ── Misc ── */
-    .hint { font-size:12px; color:var(--secondary-text-color); margin:0; }
-
-    .var-row { display:flex; align-items:center; gap:6px; }
-    .var-sep { color:var(--secondary-text-color); flex-shrink:0; }
-
-    .anchor-picker { display:grid; grid-template-columns:repeat(3, 32px); gap:3px; }
-    .anchor-cell {
-      width:32px; height:32px; border-radius:6px; cursor:pointer;
-      background:var(--secondary-background-color);
-      border:1px solid var(--divider-color,rgba(0,0,0,.2));
-      font-size:15px; display:flex; align-items:center; justify-content:center;
-    }
-    .anchor-cell--active { background:var(--primary-color); color:white; border-color:var(--primary-color); }
-
-    .threshold-row { align-items:center; gap:6px; }
-    .threshold-label { font-size:12px; color:var(--secondary-text-color); flex-shrink:0; }
-    .threshold-days { width:56px !important; flex:none; padding:6px 8px; }
-    .threshold-color {
-      width:36px; height:28px; padding:2px; border-radius:6px;
-      border:1px solid var(--divider-color,rgba(0,0,0,.2));
-      background:var(--card-background-color); cursor:pointer;
-    }
-  `;
-}
       cursor:pointer; color:var(--primary-color) !important;
       text-decoration:underline; text-underline-offset:2px;
     }

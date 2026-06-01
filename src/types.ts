@@ -41,7 +41,8 @@ export interface RoomConfig {
   icon_anchor?: "none"|"tl"|"t"|"tr"|"l"|"c"|"r"|"bl"|"b"|"br";
   segment_id?: number;
   area_id?: string;
-  clean_time_mins?: number;            // odhadovaný čas úklidu (minuty)
+  clean_time_mins?: number;            // odhadovaný čas úklidu (minuty) — fallback when no entity
+  clean_time_entity?: string;          // input_number — auto-calibrated rolling average (minutes)
   last_clean_entity?: string;
   map_x: number;
   map_y: number;
@@ -136,4 +137,5 @@ export interface RoborockVacuumCardConfig {
   room_border_normal?: number;    // border width when room is not selected, default 2
   room_border_selected?: number;  // border width when room is selected, default 4
   room_thresholds?: RoomThreshold[];
+  room_icon_hidden?: boolean;     // hide all room overlay icons globally
 }

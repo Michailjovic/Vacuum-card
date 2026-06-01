@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-01
+
+### Added
+
+- **Auto-calibration of room clean time** — add an `input_number` helper to any room via the new *Auto-calibration (input_number)* field. After each cleaning session the card measures actual time spent in each room (tracked via `current_room_entity`) and writes a rolling average (70 % old, 30 % new) back to the entity. The static `clean_time_mins` field becomes a fallback when no entity is set.
+- **Manual "Log clean now" button** — each room with a `last_clean_entity` configured now shows a *✓ Log clean now* button in the editor. Clicking it writes the current timestamp to the `input_datetime` entity immediately.
+- **Global "Hide room icons" toggle** — new toggle in the Global tab under Room appearance. Hides all room overlay icons across all vacuums without touching per-room config.
+- **All vacuums expanded by default** — on first load the editor opens all vacuum accordions automatically.
+
+### Fixed
+
+- Maps tab: Offset X and Offset Y sliders are now on separate rows — they no longer overlap in the narrow editor panel.
+
+---
+
 ## [0.7.0.3] - 2026-06-01
 
 ### Fixed

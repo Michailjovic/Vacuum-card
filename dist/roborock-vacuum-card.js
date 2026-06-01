@@ -87,7 +87,7 @@ const t={ATTRIBUTE:1},e=t=>(...e)=>({_$litDirective$:t,values:e});let i$1 = clas
 
 const CARD_NAME = "roborock-vacuum-card";
 const EDITOR_NAME = "roborock-vacuum-card-editor";
-const CARD_VERSION = "0.7.0.3";
+const CARD_VERSION = "0.8.0";
 /** Hold duration in ms required to trigger START / PAUSE actions */
 const HOLD_DURATION_MS = 600;
 /**
@@ -191,6 +191,8 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
         this._inFlight = new Map();
         this._prevVacStates = new Map();
         this._prevRoomStates = new Map();
+        /** Auto-calibration: timestamp when vacuum entered each room (key = vacEntity:roomName) */
+        this._roomEnterTimes = new Map();
         this._holdTimer = null;
         this._holdEnd = () => {
             this._cancelHold();
@@ -249,12 +251,22 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
                 this._evalCleaningComplete(vac.entity, flight);
             }
             this._prevVacStates.set(vac.entity, newState);
-            // room_entered event
+            // room_entered event + auto-calibration tracking
             if (vac.current_room_entity && this._inFlight.has(vac.entity)) {
                 const newRoom = this.hass.states[vac.current_room_entity]?.state ?? "";
                 const prevRoom = this._prevRoomStates.get(vac.entity) ?? "";
                 if (newRoom && newRoom !== prevRoom &&
                     newRoom !== "unknown" && newRoom !== "unavailable") {
+                    if (prevRoom) {
+                        const enterKey = vac.entity + ":" + prevRoom;
+                        const enterTime = this._roomEnterTimes.get(enterKey);
+                        if (enterTime) {
+                            const elapsedMins = (Date.now() - enterTime) / 60000;
+                            this._updateRoomCleanTime(vac, prevRoom, elapsedMins);
+                            this._roomEnterTimes.delete(enterKey);
+                        }
+                    }
+                    this._roomEnterTimes.set(vac.entity + ":" + newRoom, Date.now());
                     this._fireHAEvent({
                         action: "room_entered",
                         vacuum_entity: vac.entity,
@@ -323,11 +335,19 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
     _hasSelectedRooms(vac) {
         return (vac.rooms ?? []).some((r) => this._isRoomSelected(r, vac));
     }
+    _roomCleanMins(room) {
+        if (room.clean_time_entity) {
+            const val = parseFloat(this.hass.states[room.clean_time_entity]?.state ?? "");
+            if (!isNaN(val) && val > 0)
+                return val;
+        }
+        return room.clean_time_mins ?? 0;
+    }
     _totalCleanMins(vac) {
         return (vac.rooms ?? []).reduce((sum, r) => {
-            if (!this._isRoomSelected(r, vac) || !r.clean_time_mins)
+            if (!this._isRoomSelected(r, vac))
                 return sum;
-            return sum + r.clean_time_mins;
+            return sum + this._roomCleanMins(r);
         }, 0);
     }
     _roomAgeDays(room) {
@@ -481,10 +501,39 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
             console.error("[roborock-vacuum-card] fire_event failed:", err);
         }
     }
+    async _updateRoomCleanTime(vac, roomName, elapsedMins) {
+        if (elapsedMins < 0.5 || elapsedMins > 120)
+            return;
+        const room = (vac.rooms ?? []).find(r => r.name === roomName || r.key === roomName);
+        if (!room?.clean_time_entity)
+            return;
+        const currentVal = parseFloat(this.hass.states[room.clean_time_entity]?.state ?? "0");
+        const newAvg = currentVal > 0
+            ? Math.round(0.7 * currentVal + 0.3 * elapsedMins)
+            : Math.round(elapsedMins);
+        await this._call("input_number", "set_value", {
+            entity_id: room.clean_time_entity,
+            value: newAvg,
+        });
+    }
     async _evalCleaningComplete(vacEntity, flight) {
         const actualMs = Date.now() - flight.startTime;
         const actualMins = Math.round(actualMs / 60000);
         const success = flight.expectedMs === 0 || actualMs >= flight.expectedMs * 0.5;
+        // Auto-calibration: handle last room (no room_entered transition at session end)
+        const lastRoom = this._prevRoomStates.get(vacEntity) ?? "";
+        if (lastRoom) {
+            const enterKey = vacEntity + ":" + lastRoom;
+            const enterTime = this._roomEnterTimes.get(enterKey);
+            if (enterTime) {
+                const vacConf = this._config.vacuums.find(v => v.entity === vacEntity);
+                if (vacConf) {
+                    const elapsedMins = (Date.now() - enterTime) / 60000;
+                    await this._updateRoomCleanTime(vacConf, lastRoom, elapsedMins);
+                }
+                this._roomEnterTimes.delete(enterKey);
+            }
+        }
         if (success) {
             const dt = new Date().toISOString().replace("T", " ").slice(0, 19);
             for (const room of flight.rooms) {
@@ -562,7 +611,7 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
         const totalMins = this._totalCleanMins(vac);
         const vacLabel = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
         this._inFlight.set(vac.entity, {
-            rooms: selected.map(r => ({ key: r.key, name: r.name, last_clean_entity: r.last_clean_entity })),
+            rooms: selected.map(r => ({ key: r.key, name: r.name, last_clean_entity: r.last_clean_entity, clean_time_entity: r.clean_time_entity })),
             expectedMs: totalMins * 60000,
             startTime: Date.now(),
             vacLabel,
@@ -723,7 +772,7 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
           title=${room.name} aria-label=${room.name}
           aria-pressed=${selected ? "true" : "false"}
         >
-          ${anchor !== "none" && room.icon ? b `
+          ${!this._config.room_icon_hidden && anchor !== "none" && room.icon ? b `
             <ha-icon icon=${room.icon}
               style=${o({ color: selected ? "white" : ageColor, "--mdc-icon-size": "16px" })}>
             </ha-icon>
@@ -747,9 +796,11 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
         title=${room.name} aria-label=${room.name}
         aria-pressed=${selected ? "true" : "false"}
       >
-        <ha-icon icon=${room.icon || "mdi:square"}
-          style=${o({ color: selected ? "white" : "rgba(255,255,255,0.5)" })}>
-        </ha-icon>
+        ${!this._config.room_icon_hidden ? b `
+          <ha-icon icon=${room.icon || "mdi:square"}
+            style=${o({ color: selected ? "white" : "rgba(255,255,255,0.5)" })}>
+          </ha-icon>
+        ` : A}
       </button>
     `;
     }
@@ -1290,9 +1341,14 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
         // Maps tab state
         this._mapVac = 0;
         this._mapRoom = null;
+        this._initialized = false;
     }
     setConfig(config) {
         this._config = config;
+        if (!this._initialized) {
+            this._initialized = true;
+            this._openVac = new Set(config.vacuums.map((_, i) => i));
+        }
     }
     updated(changed) {
         if (changed.has("hass") && this.hass) {
@@ -1305,6 +1361,13 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
         }
     }
     // ── Config helpers ────────────────────────────────────────────────────────
+    _logCleanNow(entityId) {
+        const dt = new Date().toISOString().replace("T", " ").slice(0, 19);
+        this.hass.callService("input_datetime", "set_datetime", {
+            entity_id: entityId,
+            datetime: dt,
+        }).catch((e) => console.error("[editor] log clean now failed:", e));
+    }
     _fire(config) {
         this.dispatchEvent(new CustomEvent("config-changed", {
             detail: { config }, bubbles: true, composed: true,
@@ -1754,8 +1817,18 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
         }} />
             </div>
             <p class="hint">Find IDs: Developer Tools → Actions → roborock.get_maps</p>
-            ${this._numberSlider("Est. clean time", room.clean_time_mins ?? 0, 0, 120, 1, v => this._setRoom(vacIdx, roomIdx, { clean_time_mins: v > 0 ? v : undefined }), " min")}
+            ${this._numberSlider("Est. clean time (fallback)", room.clean_time_mins ?? 0, 0, 120, 1, v => this._setRoom(vacIdx, roomIdx, { clean_time_mins: v > 0 ? v : undefined }), " min")}
+            ${this._entityPicker("Auto-calibration (input_number)", room.clean_time_entity, ["input_number"], v => this._setRoom(vacIdx, roomIdx, { clean_time_entity: v || undefined }))}
+            ${room.clean_time_entity ? b `
+              <p class="hint">Card measures actual room time and writes rolling average here automatically.</p>
+            ` : A}
             ${this._entityPicker("Last clean (input_datetime)", room.last_clean_entity, ["input_datetime"], v => this._setRoom(vacIdx, roomIdx, { last_clean_entity: v || undefined }))}
+            ${room.last_clean_entity ? b `
+              <button class="btn btn--sm" style="align-self:flex-start"
+                @click=${() => this._logCleanNow(room.last_clean_entity)}>
+                ✓ Log clean now
+              </button>
+            ` : A}
             <p class="hint map-hint" @click=${() => { this._tab = "maps"; this._mapVac = vacIdx; this._mapRoom = roomIdx; }}>
               📍 Set position in the <strong>Maps tab</strong> →
             </p>
@@ -1838,10 +1911,8 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
             </div>
 
             ${this._mapRoom !== null ? b `
-              <div class="two-col">
-                ${this._numberSlider("X", rooms[this._mapRoom]?.map_x ?? 50, 0, 100, 1, v => this._setRoom(mapVac, this._mapRoom, { map_x: v }), "%")}
-                ${this._numberSlider("Y", rooms[this._mapRoom]?.map_y ?? 50, 0, 100, 1, v => this._setRoom(mapVac, this._mapRoom, { map_y: v }), "%")}
-              </div>
+              ${this._numberSlider("X", rooms[this._mapRoom]?.map_x ?? 50, 0, 100, 1, v => this._setRoom(mapVac, this._mapRoom, { map_x: v }), "%")}
+              ${this._numberSlider("Y", rooms[this._mapRoom]?.map_y ?? 50, 0, 100, 1, v => this._setRoom(mapVac, this._mapRoom, { map_y: v }), "%")}
               ${(() => {
             const room = rooms[this._mapRoom];
             return room?.map_w !== undefined ? b `
@@ -1883,6 +1954,15 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
 
         <div class="section-title" style="margin-top:4px">Room appearance</div>
         <p class="hint">Applies to all vacuums.</p>
+        <div class="field field--row">
+          <label>Hide room icons</label>
+          <label class="toggle-wrap">
+            <input type="checkbox" class="toggle-input"
+              .checked=${this._config.room_icon_hidden ?? false}
+              @change=${(e) => this._setConfig({ room_icon_hidden: e.target.checked || undefined })} />
+            <span class="toggle-track"></span>
+          </label>
+        </div>
         ${this._numberSlider("Border (idle)", this._config.room_border_normal ?? 2, 0, 12, 1, v => this._setConfig({ room_border_normal: v }), "px")}
         ${this._numberSlider("Border (selected)", this._config.room_border_selected ?? 4, 0, 12, 1, v => this._setConfig({ room_border_selected: v }), "px")}
 
@@ -2083,6 +2163,20 @@ RoborockVacuumCardEditor.styles = i$5 `
       padding:10px; display:flex; flex-direction:column; gap:8px;
       border-top:1px solid var(--divider-color,rgba(0,0,0,.1));
     }
+
+    /* ── Toggle switch ── */
+    .toggle-wrap { position:relative; display:inline-flex; align-items:center; cursor:pointer; }
+    .toggle-input { position:absolute; opacity:0; width:0; height:0; }
+    .toggle-track {
+      width:36px; height:20px; border-radius:10px;
+      background:var(--divider-color,rgba(0,0,0,.2)); transition:background .2s; position:relative;
+    }
+    .toggle-track::after {
+      content:""; position:absolute; top:2px; left:2px;
+      width:16px; height:16px; border-radius:50%; background:white; transition:transform .2s;
+    }
+    .toggle-input:checked + .toggle-track { background:var(--primary-color); }
+    .toggle-input:checked + .toggle-track::after { transform:translateX(16px); }
 
     /* ── Map hint link ── */
     .map-hint {

@@ -32,7 +32,12 @@ console.info(
 );
 
 type InFlightCleaning = {
-  rooms: Array<{ key: string; name: string; last_clean_entity?: string }>;
+  rooms: Array<{
+    key: string;
+    name: string;
+    last_clean_entity?: string;
+    clean_time_entity?: string;
+  }>;
   expectedMs: number;
   startTime: number;
   vacLabel: string;
@@ -52,6 +57,8 @@ export class RoborockVacuumCard extends LitElement {
   private _inFlight = new Map<string, InFlightCleaning>();
   private _prevVacStates = new Map<string, string>();
   private _prevRoomStates = new Map<string, string>();
+  /** Auto-calibration: timestamp when vacuum entered each room (key = vacEntity:roomName) */
+  private _roomEnterTimes = new Map<string, number>();
 
   private _holdTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -111,12 +118,22 @@ export class RoborockVacuumCard extends LitElement {
         this._evalCleaningComplete(vac.entity, flight);
       }
       this._prevVacStates.set(vac.entity, newState);
-      // room_entered event
+      // room_entered event + auto-calibration tracking
       if (vac.current_room_entity && this._inFlight.has(vac.entity)) {
         const newRoom = this.hass.states[vac.current_room_entity]?.state ?? "";
         const prevRoom = this._prevRoomStates.get(vac.entity) ?? "";
         if (newRoom && newRoom !== prevRoom &&
             newRoom !== "unknown" && newRoom !== "unavailable") {
+          if (prevRoom) {
+            const enterKey = vac.entity + ":" + prevRoom;
+            const enterTime = this._roomEnterTimes.get(enterKey);
+            if (enterTime) {
+              const elapsedMins = (Date.now() - enterTime) / 60_000;
+              this._updateRoomCleanTime(vac, prevRoom, elapsedMins);
+              this._roomEnterTimes.delete(enterKey);
+            }
+          }
+          this._roomEnterTimes.set(vac.entity + ":" + newRoom, Date.now());
           this._fireHAEvent({
             action: "room_entered",
             vacuum_entity: vac.entity,
@@ -193,10 +210,18 @@ export class RoborockVacuumCard extends LitElement {
     return (vac.rooms ?? []).some((r) => this._isRoomSelected(r, vac));
   }
 
+  private _roomCleanMins(room: RoomConfig): number {
+    if (room.clean_time_entity) {
+      const val = parseFloat(this.hass.states[room.clean_time_entity]?.state ?? "");
+      if (!isNaN(val) && val > 0) return val;
+    }
+    return room.clean_time_mins ?? 0;
+  }
+
   private _totalCleanMins(vac: VacuumConfig): number {
     return (vac.rooms ?? []).reduce((sum, r) => {
-      if (!this._isRoomSelected(r, vac) || !r.clean_time_mins) return sum;
-      return sum + r.clean_time_mins;
+      if (!this._isRoomSelected(r, vac)) return sum;
+      return sum + this._roomCleanMins(r);
     }, 0);
   }
 
@@ -350,12 +375,45 @@ export class RoborockVacuumCard extends LitElement {
     }
   }
 
+  private async _updateRoomCleanTime(
+    vac: VacuumConfig, roomName: string, elapsedMins: number
+  ): Promise<void> {
+    if (elapsedMins < 0.5 || elapsedMins > 120) return;
+    const room = (vac.rooms ?? []).find(
+      r => r.name === roomName || r.key === roomName
+    );
+    if (!room?.clean_time_entity) return;
+    const currentVal = parseFloat(this.hass.states[room.clean_time_entity]?.state ?? "0");
+    const newAvg = currentVal > 0
+      ? Math.round(0.7 * currentVal + 0.3 * elapsedMins)
+      : Math.round(elapsedMins);
+    await this._call("input_number", "set_value", {
+      entity_id: room.clean_time_entity,
+      value: newAvg,
+    });
+  }
+
   private async _evalCleaningComplete(
     vacEntity: string, flight: InFlightCleaning
   ): Promise<void> {
     const actualMs = Date.now() - flight.startTime;
     const actualMins = Math.round(actualMs / 60_000);
     const success = flight.expectedMs === 0 || actualMs >= flight.expectedMs * 0.5;
+
+    // Auto-calibration: handle last room (no room_entered transition at session end)
+    const lastRoom = this._prevRoomStates.get(vacEntity) ?? "";
+    if (lastRoom) {
+      const enterKey = vacEntity + ":" + lastRoom;
+      const enterTime = this._roomEnterTimes.get(enterKey);
+      if (enterTime) {
+        const vacConf = this._config.vacuums.find(v => v.entity === vacEntity);
+        if (vacConf) {
+          const elapsedMins = (Date.now() - enterTime) / 60_000;
+          await this._updateRoomCleanTime(vacConf, lastRoom, elapsedMins);
+        }
+        this._roomEnterTimes.delete(enterKey);
+      }
+    }
 
     if (success) {
       const dt = new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -443,7 +501,7 @@ export class RoborockVacuumCard extends LitElement {
     const totalMins = this._totalCleanMins(vac);
     const vacLabel = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
     this._inFlight.set(vac.entity, {
-      rooms: selected.map(r => ({ key: r.key, name: r.name, last_clean_entity: r.last_clean_entity })),
+      rooms: selected.map(r => ({ key: r.key, name: r.name, last_clean_entity: r.last_clean_entity, clean_time_entity: r.clean_time_entity })),
       expectedMs: totalMins * 60_000,
       startTime: Date.now(),
       vacLabel,
@@ -613,7 +671,7 @@ export class RoborockVacuumCard extends LitElement {
           title=${room.name} aria-label=${room.name}
           aria-pressed=${selected ? "true" : "false"}
         >
-          ${anchor !== "none" && room.icon ? html`
+          ${!this._config.room_icon_hidden && anchor !== "none" && room.icon ? html`
             <ha-icon icon=${room.icon}
               style=${styleMap({ color: selected ? "white" : ageColor, "--mdc-icon-size": "16px" })}>
             </ha-icon>
@@ -638,9 +696,11 @@ export class RoborockVacuumCard extends LitElement {
         title=${room.name} aria-label=${room.name}
         aria-pressed=${selected ? "true" : "false"}
       >
-        <ha-icon icon=${room.icon || "mdi:square"}
-          style=${styleMap({ color: selected ? "white" : "rgba(255,255,255,0.5)" })}>
-        </ha-icon>
+        ${!this._config.room_icon_hidden ? html`
+          <ha-icon icon=${room.icon || "mdi:square"}
+            style=${styleMap({ color: selected ? "white" : "rgba(255,255,255,0.5)" })}>
+          </ha-icon>
+        ` : nothing}
       </button>
     `;
   }
