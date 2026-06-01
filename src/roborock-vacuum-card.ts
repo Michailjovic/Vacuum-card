@@ -31,6 +31,14 @@ console.info(
   "background:#1a1a1a;color:#fff;font-weight:400;padding:2px 4px;border-radius:0 3px 3px 0"
 );
 
+type InFlightCleaning = {
+  rooms: Array<{ key: string; name: string; last_clean_entity?: string }>;
+  expectedMs: number;
+  startTime: number;
+  vacLabel: string;
+  cleanType: "wet" | "dry";
+};
+
 @customElement(CARD_NAME)
 export class RoborockVacuumCard extends LitElement {
   @property({ attribute: false }) hass!: HomeAssistant;
@@ -40,6 +48,10 @@ export class RoborockVacuumCard extends LitElement {
   @state() private _holdId: string | null = null;
   /** Výběr místností — drží se lokálně v kartě (bez potřeby input_boolean helper entity) */
   @state() private _localRoomSel = new Map<string, boolean>();
+  /** Aktivní úklidy — sledování průběhu pro vyhodnocení úspěchu */
+  private _inFlight = new Map<string, InFlightCleaning>();
+  private _prevVacStates = new Map<string, string>();
+  private _prevRoomStates = new Map<string, string>();
 
   private _holdTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -83,6 +95,39 @@ export class RoborockVacuumCard extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this._cancelHold();
+  }
+
+  protected updated(changed: PropertyValues): void {
+    if (!changed.has("hass") || !this.hass || !this._config) return;
+    for (const vac of this._config.vacuums) {
+      const newState = this.hass.states[vac.entity]?.state ?? "";
+      const prevState = this._prevVacStates.get(vac.entity) ?? newState;
+      // Přechod do docked/charging při aktivním úklidu → vyhodnoť
+      if (prevState !== newState &&
+          (newState === "docked" || newState === "charging") &&
+          this._inFlight.has(vac.entity)) {
+        const flight = this._inFlight.get(vac.entity)!;
+        this._inFlight.delete(vac.entity);
+        this._evalCleaningComplete(vac.entity, flight);
+      }
+      this._prevVacStates.set(vac.entity, newState);
+      // room_entered event
+      if (vac.current_room_entity && this._inFlight.has(vac.entity)) {
+        const newRoom = this.hass.states[vac.current_room_entity]?.state ?? "";
+        const prevRoom = this._prevRoomStates.get(vac.entity) ?? "";
+        if (newRoom && newRoom !== prevRoom &&
+            newRoom !== "unknown" && newRoom !== "unavailable") {
+          this._fireHAEvent({
+            action: "room_entered",
+            vacuum_entity: vac.entity,
+            vacuum_label: vac.name ?? vac.entity,
+            clean_type: this._deriveCleanType(vac),
+            room_name: newRoom,
+          });
+        }
+        this._prevRoomStates.set(vac.entity, newRoom);
+      }
+    }
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────
@@ -279,6 +324,58 @@ export class RoborockVacuumCard extends LitElement {
     }));
   }
 
+  private _deriveCleanType(vac: VacuumConfig): "wet" | "dry" {
+    if (vac.clean_action?.type === "native") {
+      const na = vac.clean_action as NativeCleanAction;
+      if (na.mop_mode_entity || na.mop_intensity_entity) return "wet";
+    }
+    return "dry";
+  }
+
+  private _fireHAEvent(data: Record<string, unknown>): void {
+    try {
+      (this.hass as any).connection.sendMessage({
+        type: "fire_event",
+        event_type: "roborock_card_event",
+        event_data: data,
+      });
+    } catch (err) {
+      console.error("[roborock-vacuum-card] fire_event failed:", err);
+    }
+  }
+
+  private async _evalCleaningComplete(
+    vacEntity: string, flight: InFlightCleaning
+  ): Promise<void> {
+    const actualMs = Date.now() - flight.startTime;
+    const actualMins = Math.round(actualMs / 60_000);
+    const success = flight.expectedMs === 0 || actualMs >= flight.expectedMs * 0.5;
+
+    if (success) {
+      const dt = new Date().toISOString().replace("T", " ").slice(0, 19);
+      for (const room of flight.rooms) {
+        if (room.last_clean_entity) {
+          await this._call("input_datetime", "set_datetime", {
+            entity_id: room.last_clean_entity,
+            datetime: dt,
+          });
+        }
+      }
+    }
+
+    this._fireHAEvent({
+      action: "cleaning_finished",
+      vacuum_entity: vacEntity,
+      vacuum_label: flight.vacLabel,
+      clean_type: flight.cleanType,
+      rooms: flight.rooms.map(r => r.key),
+      room_labels: flight.rooms.map(r => r.name).join(", "),
+      estimated_mins: Math.round(flight.expectedMs / 60_000),
+      actual_mins: actualMins,
+      success,
+    });
+  }
+
   private _pause(vac: VacuumConfig): void {
     this._call("vacuum", "pause", { entity_id: vac.entity });
   }
@@ -334,6 +431,26 @@ export class RoborockVacuumCard extends LitElement {
       entity_id: vac.entity,
       command: "app_segment_clean",
       params: [{ segments, repeat: action.repeat ?? 1 }],
+    });
+
+    // Zaregistruj in-flight + vystřel event
+    const totalMins = this._totalCleanMins(vac);
+    const vacLabel = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
+    this._inFlight.set(vac.entity, {
+      rooms: selected.map(r => ({ key: r.key, name: r.name, last_clean_entity: r.last_clean_entity })),
+      expectedMs: totalMins * 60_000,
+      startTime: Date.now(),
+      vacLabel,
+      cleanType: this._deriveCleanType(vac),
+    });
+    this._fireHAEvent({
+      action: "cleaning_started",
+      vacuum_entity: vac.entity,
+      vacuum_label: vacLabel,
+      clean_type: this._deriveCleanType(vac),
+      rooms: selected.map(r => r.key),
+      room_labels: selected.map(r => r.name).join(", "),
+      estimated_mins: Math.round(totalMins),
     });
   }
 
