@@ -562,6 +562,26 @@ export class RoborockVacuumCardEditor extends LitElement {
           ${this._textField("Display name", room.name,
             v => this._setRoom(vacIdx, roomIdx, { name: v }), "e.g. Bedroom")}
           ${this._iconPickerField(room.icon, v => this._setRoom(vacIdx, roomIdx, { icon: v }))}
+          ${room.icon ? html`
+            <div class="field">
+              <label>Icon position</label>
+              <div class="anchor-picker">
+                ${(["tl","t","tr","l","c","r","bl","b","br"] as const).map(pos => {
+                  const labels: Record<string,string> = {tl:"↖",t:"↑",tr:"↗",l:"←",c:"·",r:"→",bl:"↙",b:"↓",br:"↘"};
+                  return html`<button
+                    class="anchor-cell ${(room.icon_anchor ?? "c") === pos ? "anchor-cell--active" : ""}"
+                    title=${pos}
+                    @click=${() => this._setRoom(vacIdx, roomIdx, { icon_anchor: pos })}>
+                    ${labels[pos]}
+                  </button>`;
+                })}
+              </div>
+              <button class="btn btn--sm" style="margin-top:4px"
+                @click=${() => this._setRoom(vacIdx, roomIdx, { icon_anchor: "none" as any })}>
+                Hide icon in overlay
+              </button>
+            </div>
+          ` : nothing}
         </div>
 
         <div class="section"><div class="section-title">Cleaning</div>
@@ -613,6 +633,13 @@ export class RoborockVacuumCardEditor extends LitElement {
             v => this._setRoom(vacIdx, roomIdx, { map_x: v }), "%")}
           ${this._numberSlider("Y position", room.map_y ?? 50, 0, 100, 1,
             v => this._setRoom(vacIdx, roomIdx, { map_y: v }), "%")}
+          <div class="sub-title" style="margin-top:8px">Rectangle mód (volitelné)</div>
+          <p class="hint">Pokud nastavíš šířku a výšku, místnost se zobrazí jako obdélník.<br>
+            map_x/y = střed obdélníku. Bez nastavení = klasické tlačítko.</p>
+          ${this._numberSlider("Šířka (map_w)", room.map_w ?? 0, 0, 80, 1,
+            v => this._setRoom(vacIdx, roomIdx, { map_w: v > 0 ? v : undefined }), "%")}
+          ${this._numberSlider("Výška (map_h)", room.map_h ?? 0, 0, 80, 1,
+            v => this._setRoom(vacIdx, roomIdx, { map_h: v > 0 ? v : undefined }), "%")}
         </div>
       </div>`;
   }
@@ -816,5 +843,19 @@ export class RoborockVacuumCardEditor extends LitElement {
     .pos-dot--active { background:rgba(33,150,243,.75); border-color:#2196F3; color:white; }
 
     .hint { font-size:12px; color:var(--secondary-text-color); margin:0; }
+
+    .anchor-picker {
+      display:grid; grid-template-columns:repeat(3, 32px); gap:3px;
+    }
+    .anchor-cell {
+      width:32px; height:32px; border-radius:6px; cursor:pointer;
+      background:var(--secondary-background-color);
+      border:1px solid var(--divider-color,rgba(0,0,0,.2));
+      font-size:15px; display:flex; align-items:center; justify-content:center;
+    }
+    .anchor-cell--active {
+      background:var(--primary-color); color:white;
+      border-color:var(--primary-color);
+    }
   `;
 }

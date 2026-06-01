@@ -29,10 +29,16 @@ export interface MapConfig {
   offset_y: number;
 }
 
+export interface RoomThreshold {
+  days: number;
+  color: string;
+}
+
 export interface RoomConfig {
   key: string;
   name: string;
-  icon: string;
+  icon?: string;                     // volitelné v rectangle módu
+  icon_anchor?: "none"|"tl"|"t"|"tr"|"l"|"c"|"r"|"bl"|"b"|"br";
   segment_id?: number;
   area_id?: string;
   toggle_entity?: string;
@@ -40,6 +46,9 @@ export interface RoomConfig {
   last_clean_entity?: string;
   map_x: number;
   map_y: number;
+  map_w?: number;                    // šířka % → aktivuje rectangle mód
+  map_h?: number;                    // výška %
+  thresholds?: RoomThreshold[];      // vlastní thresholds pro barvu borderu
 }
 
 // ── Clean action strategies ───────────────────────────────────────────────

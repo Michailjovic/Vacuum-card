@@ -7,6 +7,7 @@ import type {
   VacuumConfig,
   RoborockVacuumCardConfig,
   RoomConfig,
+  RoomThreshold,
   NativeCleanAction,
   ScriptCleanAction,
   GlobalAction,
@@ -37,6 +38,8 @@ export class RoborockVacuumCard extends LitElement {
   @state() private _shownSet = new Set<number>([0]);
   /** ID of the button currently being held — drives the fill animation */
   @state() private _holdId: string | null = null;
+  /** Local selection state — fallback when toggle_entity chybí nebo neexistuje */
+  @state() private _localRoomSel = new Map<string, boolean>();
 
   private _holdTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -137,20 +140,20 @@ export class RoborockVacuumCard extends LitElement {
     return isNaN(n) || n === 0 ? null : n;
   }
 
-  private _isRoomSelected(room: RoomConfig): boolean {
-    if (room.toggle_entity) {
-      return this.hass.states[room.toggle_entity]?.state === "on";
+  private _isRoomSelected(room: RoomConfig, vac: VacuumConfig): boolean {
+    if (room.toggle_entity && this.hass.states[room.toggle_entity]) {
+      return this.hass.states[room.toggle_entity].state === "on";
     }
-    return false;
+    return this._localRoomSel.get(vac.entity + ":" + room.key) ?? false;
   }
 
   private _hasSelectedRooms(vac: VacuumConfig): boolean {
-    return (vac.rooms ?? []).some((r) => this._isRoomSelected(r));
+    return (vac.rooms ?? []).some((r) => this._isRoomSelected(r, vac));
   }
 
   private _totalCleanMins(vac: VacuumConfig): number {
     return (vac.rooms ?? []).reduce((sum, r) => {
-      if (!this._isRoomSelected(r) || !r.clean_time_entity) return sum;
+      if (!this._isRoomSelected(r, vac) || !r.clean_time_entity) return sum;
       const t = parseFloat(this.hass.states[r.clean_time_entity]?.state ?? "0");
       return sum + (isNaN(t) ? 0 : t);
     }, 0);
@@ -165,11 +168,15 @@ export class RoborockVacuumCard extends LitElement {
 
   private _roomBorderColor(room: RoomConfig): string {
     const d = this._roomAgeDays(room);
-    if (d === null) return "rgba(255,77,77,0.8)";
-    if (d < 2) return "rgba(46,204,113,0.8)";
-    if (d < 4) return "rgba(250,173,20,0.8)";
-    if (d < 7) return "rgba(255,152,0,0.8)";
-    return "rgba(255,77,77,0.8)";
+    if (d === null) return "rgba(255,77,77,0.85)";
+    const ths: RoomThreshold[] = room.thresholds ?? [
+      { days: 2, color: "rgba(46,204,113,0.85)" },
+      { days: 5, color: "rgba(250,173,20,0.85)" },
+      { days: 10, color: "rgba(255,152,0,0.85)" },
+    ];
+    const sorted = [...ths].sort((a, b) => a.days - b.days);
+    for (const th of sorted) { if (d <= th.days) return th.color; }
+    return "rgba(255,77,77,0.85)";
   }
 
   private _batIcon(pct: number): string {
@@ -288,16 +295,21 @@ export class RoborockVacuumCard extends LitElement {
     this._call("vacuum", "return_to_base", { entity_id: vac.entity });
   }
 
-  private _toggleRoom(room: RoomConfig): void {
-    if (room.toggle_entity) {
+  private _toggleRoom(room: RoomConfig, vac: VacuumConfig): void {
+    if (room.toggle_entity && this.hass.states[room.toggle_entity]) {
       this._call("input_boolean", "toggle", { entity_id: room.toggle_entity });
+    } else {
+      const k = vac.entity + ":" + room.key;
+      const next = new Map(this._localRoomSel);
+      next.set(k, !(next.get(k) ?? false));
+      this._localRoomSel = next;
     }
   }
 
   private async _startClean(vac: VacuumConfig): Promise<void> {
     if (!vac.clean_action) return;
 
-    const selected = (vac.rooms ?? []).filter((r) => this._isRoomSelected(r));
+    const selected = (vac.rooms ?? []).filter((r) => this._isRoomSelected(r, vac));
     if (selected.length === 0) return;
 
     if (vac.clean_action.type === "script") {
@@ -447,34 +459,71 @@ export class RoborockVacuumCard extends LitElement {
             transform: "translate(-50%,-50%) rotate(" + rotation + "deg)",
           })}
         />
-        ${(vac.rooms ?? []).map((r) => this._renderRoomBtn(r, vac))}
+        ${(vac.rooms ?? []).map((r) => this._renderRoomOverlay(r, vac))}
       </div>
     `;
   }
 
-  private _renderRoomBtn(room: RoomConfig, vac: VacuumConfig) {
-    const selected = this._isRoomSelected(room);
+  private _renderRoomOverlay(room: RoomConfig, vac: VacuumConfig) {
+    const selected = this._isRoomSelected(room, vac);
     const color = this._color(vac);
-    const border = this._roomBorderColor(room);
+    const ageColor = this._roomBorderColor(room);
+    const anchor = room.icon_anchor ?? "c";
+
+    if (room.map_w !== undefined && room.map_h !== undefined) {
+      // ── Rectangle mód ──────────────────────────────────────────
+      const ANCHOR: Record<string, [string, string]> = {
+        tl: ["flex-start","flex-start"], t:  ["center","flex-start"], tr: ["flex-end","flex-start"],
+        l:  ["flex-start","center"],     c:  ["center","center"],     r:  ["flex-end","center"],
+        bl: ["flex-start","flex-end"],   b:  ["center","flex-end"],   br: ["flex-end","flex-end"],
+      };
+      const [jc, ai] = ANCHOR[anchor] ?? ["center", "center"];
+      const borderW = selected ? "4px" : "2px";
+      const borderC = selected ? color + "E0" : ageColor;
+      const bg = selected ? color + "44" : "rgba(0,0,0,0.06)";
+      const shadow = selected ? "0 0 18px " + color + "60" : "none";
+      return html`
+        <button
+          class="room-overlay"
+          style=${styleMap({
+            left: room.map_x + "%", top: room.map_y + "%",
+            width: room.map_w + "%", height: room.map_h + "%",
+            border: borderW + " solid " + borderC,
+            background: bg, boxShadow: shadow,
+            justifyContent: jc, alignItems: ai,
+          })}
+          @click=${() => this._toggleRoom(room, vac)}
+          title=${room.name} aria-label=${room.name}
+          aria-pressed=${selected ? "true" : "false"}
+        >
+          ${anchor !== "none" && room.icon ? html`
+            <ha-icon icon=${room.icon}
+              style=${styleMap({ color: selected ? "white" : ageColor, "--mdc-icon-size": "16px" })}>
+            </ha-icon>
+          ` : nothing}
+        </button>
+      `;
+    }
+
+    // ── Point mód (legacy) ──────────────────────────────────────
     const bg = selected ? color + "A8" : "rgba(0,0,0,0.55)";
     const shadow = selected ? "0 0 12px " + color + "80" : "none";
-
     return html`
       <button
         class="room-btn"
         style=${styleMap({
-          left: room.map_x + "%",
-          top:  room.map_y + "%",
+          left: room.map_x + "%", top: room.map_y + "%",
           background: bg,
-          border: "4px solid " + border,
+          border: "4px solid " + ageColor,
           boxShadow: shadow,
         })}
-        @click=${() => this._toggleRoom(room)}
-        title=${room.name}
-        aria-label=${room.name}
+        @click=${() => this._toggleRoom(room, vac)}
+        title=${room.name} aria-label=${room.name}
         aria-pressed=${selected ? "true" : "false"}
       >
-        <ha-icon icon=${room.icon} style=${styleMap({ color: selected ? "white" : "rgba(255,255,255,0.5)" })}></ha-icon>
+        <ha-icon icon=${room.icon || "mdi:square"}
+          style=${styleMap({ color: selected ? "white" : "rgba(255,255,255,0.5)" })}>
+        </ha-icon>
       </button>
     `;
   }
@@ -628,7 +677,7 @@ export class RoborockVacuumCard extends LitElement {
                 ${(vac.rooms ?? []).map(r => html`
                   <ha-icon
                     icon=${r.icon || "mdi:square"}
-                    style=${styleMap({ color: this._isRoomSelected(r) ? color : "rgba(255,255,255,0.15)" })}
+                    style=${styleMap({ color: this._isRoomSelected(r, vac) ? color : "rgba(255,255,255,0.15)" })}
                   ></ha-icon>
                 `)}
               </div>
@@ -815,6 +864,18 @@ export class RoborockVacuumCard extends LitElement {
 
     .room-btn ha-icon {
       --mdc-icon-size: 22px;
+    }
+
+    .room-overlay {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      padding: 3px;
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      transition: background 0.2s, border 0.3s, box-shadow 0.3s;
     }
 
     /* ── Status card ─────────────────────────────────────────────────── */
