@@ -1,15 +1,16 @@
 name: Release
 
+# Triggers only when you manually create a release on GitHub.
+# Pushing tags does NOT trigger this workflow.
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  release:
+    types: [created]
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build-and-upload:
     runs-on: ubuntu-latest
 
     steps:
@@ -28,26 +29,8 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Extract changelog for this version
-        id: changelog
-        run: |
-          awk '/^## \['"${{ steps.version.outputs.VERSION }}"'\]/{found=1; next}
-               found && /^## \[/{exit}
-               found{print}' CHANGELOG.md > release_notes.txt
-          echo "RELEASE_NOTES<<EOF" >> "$GITHUB_OUTPUT"
-          cat release_notes.txt >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
+      - name: Upload dist file to release
         uses: softprops/action-gh-release@v2
         with:
-          name: "v${{ steps.version.outputs.VERSION }}"
-          body: ${{ steps.changelog.outputs.RELEASE_NOTES }}
           files: dist/roborock-vacuum-card.js
           fail_on_unmatched_files: true
-          prerelease: false
-          make_latest: true

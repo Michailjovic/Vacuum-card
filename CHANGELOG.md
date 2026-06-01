@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0.2] - 2026-06-01
+
+### Fixed
+
+- Release workflow (`release.yml`) now triggers on **manual release creation** instead of tag push. Pushing tags no longer fires the workflow or sends failure email notifications. When you create a release on GitHub, the workflow builds and attaches `roborock-vacuum-card.js` automatically.
+
+---
+
 ## [0.7.0.1] - 2026-06-01
 
 ### Fixed
