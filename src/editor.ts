@@ -113,6 +113,15 @@ export class RoborockVacuumCardEditor extends LitElement {
     this._setGlobal(idx, { action: { ...existing, ...updates } as GlobalActionCall });
   }
 
+  private _moveVacuum(idx: number, dir: -1 | 1): void {
+    const target = idx + dir;
+    const vacuums = [...this._config.vacuums];
+    if (target < 0 || target >= vacuums.length) return;
+    [vacuums[idx], vacuums[target]] = [vacuums[target], vacuums[idx]];
+    const next = { ...this._config, vacuums };
+    this._config = next; this._fire(next);
+  }
+
   private _addVacuum(): void {
     const vacuums = [...this._config.vacuums, { ...DEFAULT_VACUUM }];
     const next = { ...this._config, vacuums };
@@ -201,6 +210,25 @@ export class RoborockVacuumCardEditor extends LitElement {
       </div>`;
   }
 
+  private _optionSelect(label: string, entity: string | undefined,
+    value: string | undefined, onChange: (v: string) => void) {
+    const opts: string[] = entity
+      ? ((this.hass.states[entity]?.attributes["options"] as string[]) ?? [])
+      : [];
+    if (!opts.length) {
+      return this._textField(label, value, onChange, "e.g. balanced");
+    }
+    return html`
+      <div class="field field--row">
+        <label>${label}</label>
+        <select class="select-input"
+          @change=${(e: Event) => onChange((e.target as HTMLSelectElement).value)}>
+          <option value="">— none —</option>
+          ${opts.map(o => html`<option value=${o} ?selected=${o === value}>${o}</option>`)}
+        </select>
+      </div>`;
+  }
+
   private _iconPickerField(value: string | undefined, onChange: (v: string) => void) {
     return html`
       <div class="field">
@@ -251,6 +279,14 @@ export class RoborockVacuumCardEditor extends LitElement {
           <span class="vac-row__entity">${vac.entity}</span>
         </div>
         <div class="vac-row__actions">
+          <button class="icon-btn" ?disabled=${idx === 0}
+            @click=${() => this._moveVacuum(idx, -1)}>
+            <ha-icon icon="mdi:arrow-up"></ha-icon>
+          </button>
+          <button class="icon-btn" ?disabled=${idx === this._config.vacuums.length - 1}
+            @click=${() => this._moveVacuum(idx, 1)}>
+            <ha-icon icon="mdi:arrow-down"></ha-icon>
+          </button>
           <button class="icon-btn" @click=${() => { this._view = { type: "vacuum", idx }; }}>
             <ha-icon icon="mdi:pencil"></ha-icon>
           </button>
@@ -392,18 +428,18 @@ export class RoborockVacuumCardEditor extends LitElement {
         <div class="sub-title">Suction level (optional)</div>
         ${this._entityPicker("Suction entity", action.suction_entity, ["select"],
           v => this._setCleanAction(vacIdx, { suction_entity: v || undefined }))}
-        ${action.suction_entity ? this._textField("Suction option", action.suction_level,
-          v => this._setCleanAction(vacIdx, { suction_level: v }), "e.g. balanced") : nothing}
+        ${action.suction_entity ? this._optionSelect("Suction option", action.suction_entity, action.suction_level,
+          v => this._setCleanAction(vacIdx, { suction_level: v || undefined })) : nothing}
         <div class="sub-title">Mop mode (optional)</div>
         ${this._entityPicker("Mop mode entity", action.mop_mode_entity, ["select"],
           v => this._setCleanAction(vacIdx, { mop_mode_entity: v || undefined }))}
-        ${action.mop_mode_entity ? this._textField("Mop mode option", action.mop_mode,
-          v => this._setCleanAction(vacIdx, { mop_mode: v }), "e.g. deep") : nothing}
+        ${action.mop_mode_entity ? this._optionSelect("Mop mode option", action.mop_mode_entity, action.mop_mode,
+          v => this._setCleanAction(vacIdx, { mop_mode: v || undefined })) : nothing}
         <div class="sub-title">Mop intensity (optional)</div>
         ${this._entityPicker("Mop intensity entity", action.mop_intensity_entity, ["select"],
           v => this._setCleanAction(vacIdx, { mop_intensity_entity: v || undefined }))}
-        ${action.mop_intensity_entity ? this._textField("Mop intensity option", action.mop_intensity,
-          v => this._setCleanAction(vacIdx, { mop_intensity: v }), "e.g. intense") : nothing}
+        ${action.mop_intensity_entity ? this._optionSelect("Mop intensity option", action.mop_intensity_entity, action.mop_intensity,
+          v => this._setCleanAction(vacIdx, { mop_intensity: v || undefined })) : nothing}
       </div>`;
   }
 
