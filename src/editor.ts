@@ -1,4 +1,4 @@
-import { LitElement, html, css, nothing } from "lit";
+import { LitElement, html, css, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { styleMap } from "lit/directives/style-map.js";
 
@@ -56,6 +56,18 @@ export class RoborockVacuumCardEditor extends LitElement {
 
   setConfig(config: RoborockVacuumCardConfig): void {
     this._config = config;
+  }
+
+
+  protected updated(changed: PropertyValues): void {
+    if (changed.has("hass") && this.hass) {
+      const dl = this.shadowRoot?.getElementById("ha-entities") as HTMLDataListElement | null;
+      if (dl && !dl.options.length) {
+        dl.innerHTML = Object.keys(this.hass.states).sort()
+          .map(id => "<option value=\"" + id + "\">")
+          .join("");
+      }
+    }
   }
 
   // ── Config helpers ───────────────────────────────────────────────────────
@@ -145,12 +157,13 @@ export class RoborockVacuumCardEditor extends LitElement {
 
   private _entityPicker(label: string, value: string | undefined, domains: string[],
     onChange: (v: string) => void, required = false) {
+    const ph = domains.length ? domains.join(" / ") : "entity_id";
     return html`
       <div class="field">
         <label>${label}${required ? html`<span class="required"> *</span>` : nothing}</label>
-        <ha-entity-picker .hass=${this.hass} .value=${value ?? ""} .includeDomains=${domains}
-          allow-custom-entity @value-changed=${(e: CustomEvent) => onChange(e.detail.value)}
-        ></ha-entity-picker>
+        <input class="text-input" type="text" list="ha-entities"
+          .value=${value ?? ""} placeholder=${ph}
+          @change=${(e: Event) => onChange((e.target as HTMLInputElement).value)} />
       </div>`;
   }
 
@@ -612,11 +625,13 @@ export class RoborockVacuumCardEditor extends LitElement {
   render() {
     if (!this._config) return nothing;
     const v = this._view;
-    if (v.type === "vacuums") return this._renderVacuumList();
-    if (v.type === "vacuum") return this._renderVacuumEditor(v.idx);
-    if (v.type === "room")   return this._renderRoomEditor(v.vacuumIdx, v.roomIdx);
-    if (v.type === "global") return this._renderGlobalEditor(v.idx);
-    return nothing;
+    let view;
+    if (v.type === "vacuums")     view = this._renderVacuumList();
+    else if (v.type === "vacuum") view = this._renderVacuumEditor(v.idx);
+    else if (v.type === "room")   view = this._renderRoomEditor(v.vacuumIdx, v.roomIdx);
+    else if (v.type === "global") view = this._renderGlobalEditor(v.idx);
+    else return nothing;
+    return html`<datalist id="ha-entities"></datalist>${view}`;
   }
 
   // ── Styles ───────────────────────────────────────────────────────────────
