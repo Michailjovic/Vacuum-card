@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0.3] - 2026-06-01
+
+### Fixed
+
+- `dist/roborock-vacuum-card.js` is now committed directly to the repository (removed from `.gitignore`). The release workflow no longer builds in CI — it only attaches the already-built file to the GitHub release. This eliminates all CI build failures.
+
+---
+
 ## [0.7.0.2] - 2026-06-01
 
 ### Fixed

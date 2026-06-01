@@ -1,6 +1,6 @@
 export const CARD_NAME = "roborock-vacuum-card";
 export const EDITOR_NAME = "roborock-vacuum-card-editor";
-export const CARD_VERSION = "0.7.0.2";
+export const CARD_VERSION = "0.7.0.3";
 
 /** Hold duration in ms required to trigger START / PAUSE actions */
 export const HOLD_DURATION_MS = 600;

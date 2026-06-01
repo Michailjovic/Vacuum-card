@@ -1,7 +1,8 @@
 name: Release
 
-# Triggers only when you manually create a release on GitHub.
-# Pushing tags does NOT trigger this workflow.
+# Triggers when you manually create a release on GitHub.
+# The built dist/roborock-vacuum-card.js is committed in the repo,
+# so this workflow just attaches it to the release — no build step needed.
 on:
   release:
     types: [created]
@@ -10,26 +11,12 @@ permissions:
   contents: write
 
 jobs:
-  build-and-upload:
+  attach:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Upload dist file to release
+      - name: Attach JS to release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/roborock-vacuum-card.js
