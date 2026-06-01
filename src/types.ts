@@ -125,9 +125,6 @@ export interface VacuumConfig {
   clean_action?: CleanAction;
   current_room_entity?: string;
   error_entity?: string;
-  room_thresholds?: RoomThreshold[];  // sdílené thresholds pro všechny místnosti
-  room_border_normal?: number;        // šířka borderu overlay (nevybráno), default 2
-  room_border_selected?: number;      // šířka borderu overlay (vybráno), default 4
 }
 
 export interface RoborockVacuumCardConfig {
@@ -135,4 +132,8 @@ export interface RoborockVacuumCardConfig {
   vacuums: VacuumConfig[];
   /** Optional extra badges for whole-flat or cross-vacuum actions */
   global_actions?: GlobalAction[];
+  /** Shared room overlay appearance — applies to all vacuums */
+  room_border_normal?: number;    // border width when room is not selected, default 2
+  room_border_selected?: number;  // border width when room is selected, default 4
+  room_thresholds?: RoomThreshold[];
 }
