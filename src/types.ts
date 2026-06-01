@@ -47,8 +47,7 @@ export interface RoomConfig {
 export interface NativeCleanAction {
   type: "native";
   repeat?: number;
-  suction_entity?: string;
-  suction_level?: string;
+  suction_level?: string;  // option from vacuum entity's fan_speed_list
   mop_mode_entity?: string;
   mop_mode?: string;
   mop_intensity_entity?: string;
@@ -117,6 +116,8 @@ export interface VacuumConfig {
   map?: MapConfig;
   rooms?: RoomConfig[];
   clean_action?: CleanAction;
+  current_room_entity?: string;
+  error_entity?: string;
 }
 
 export interface RoborockVacuumCardConfig {

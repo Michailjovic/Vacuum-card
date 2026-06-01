@@ -167,10 +167,17 @@ export class RoborockVacuumCardEditor extends LitElement {
   private _entityPicker(label: string, value: string | undefined, domains: string[],
     onChange: (v: string) => void, required = false) {
     const ph = domains.length ? domains.join(" / ") : "entity_id";
+    // Pro jednu doménu filtrujeme, jinak globální datalist
+    const isSingle = domains.length === 1;
+    const listId = isSingle ? "ha-ents-" + domains[0] : "ha-entities";
+    const filtered = isSingle
+      ? Object.keys(this.hass?.states ?? {}).filter(id => id.startsWith(domains[0] + ".")).sort()
+      : null;
     return html`
+      ${filtered ? html`<datalist id=${listId}>${filtered.map(id => html`<option value=${id}>`)}</datalist>` : nothing}
       <div class="field">
         <label>${label}${required ? html`<span class="required"> *</span>` : nothing}</label>
-        <input class="text-input" type="text" list="ha-entities"
+        <input class="text-input" type="text" list=${listId}
           .value=${value ?? ""} placeholder=${ph}
           @input=${(e: Event) => { const v = (e.target as HTMLInputElement).value;
             if (v === "" || this.hass.states[v]) onChange(v); }} />
@@ -207,6 +214,19 @@ export class RoborockVacuumCardEditor extends LitElement {
         <label>${label}</label>
         <select class="select-input" @change=${(e: Event) => onChange((e.target as HTMLSelectElement).value as T)}>
           ${options.map(o => html`<option value=${o.value} ?selected=${o.value === value}>${o.label}</option>`)}
+        </select>
+      </div>`;
+  }
+
+  private _optionSelectFromList(label: string, opts: string[], value: string | undefined,
+    onChange: (v: string) => void) {
+    return html`
+      <div class="field field--row">
+        <label>${label}</label>
+        <select class="select-input"
+          @change=${(e: Event) => onChange((e.target as HTMLSelectElement).value)}>
+          <option value="">— none —</option>
+          ${opts.map(o => html`<option value=${o} ?selected=${o === value}>${o}</option>`)}
         </select>
       </div>`;
   }
@@ -358,6 +378,10 @@ export class RoborockVacuumCardEditor extends LitElement {
             v => this._setVacuum(idx, { last_clean_entity: v || undefined }))}
           ${this._entityPicker("Cleaning progress sensor", vac.progress_entity, ["sensor"],
             v => this._setVacuum(idx, { progress_entity: v || undefined }))}
+          ${this._entityPicker("Current room sensor", vac.current_room_entity, ["sensor"],
+            v => this._setVacuum(idx, { current_room_entity: v || undefined }))}
+          ${this._entityPicker("Vacuum error sensor", vac.error_entity, ["sensor"],
+            v => this._setVacuum(idx, { error_entity: v || undefined }))}
         </div>
 
         <div class="section"><div class="section-title">Map</div>
@@ -427,10 +451,15 @@ export class RoborockVacuumCardEditor extends LitElement {
         ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1,
           v => this._setCleanAction(vacIdx, { repeat: v }))}
         <div class="sub-title">Suction level (optional)</div>
-        ${this._entityPicker("Suction entity", action.suction_entity, ["select"],
-          v => this._setCleanAction(vacIdx, { suction_entity: v || undefined }))}
-        ${action.suction_entity ? this._optionSelect("Suction option", action.suction_entity, action.suction_level,
-          v => this._setCleanAction(vacIdx, { suction_level: v || undefined })) : nothing}
+        ${(() => {
+          const speeds: string[] = (this.hass.states[this._config.vacuums[vacIdx]?.entity]
+            ?.attributes["fan_speed_list"] as string[]) ?? [];
+          return speeds.length
+            ? this._optionSelectFromList("Suction option", speeds, action.suction_level,
+                v => this._setCleanAction(vacIdx, { suction_level: v || undefined }))
+            : this._textField("Suction option", action.suction_level,
+                v => this._setCleanAction(vacIdx, { suction_level: v || undefined }), "e.g. balanced");
+        })()}
         <div class="sub-title">Mop mode (optional)</div>
         ${this._entityPicker("Mop mode entity", action.mop_mode_entity, ["select"],
           v => this._setCleanAction(vacIdx, { mop_mode_entity: v || undefined }))}

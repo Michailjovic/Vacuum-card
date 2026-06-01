@@ -270,6 +270,12 @@ export class RoborockVacuumCard extends LitElement {
     }
   }
 
+  private _fireMoreInfo(entityId: string): void {
+    this.dispatchEvent(new CustomEvent("hass-more-info", {
+      bubbles: true, composed: true, detail: { entityId },
+    }));
+  }
+
   private _pause(vac: VacuumConfig): void {
     this._call("vacuum", "pause", { entity_id: vac.entity });
   }
@@ -315,8 +321,8 @@ export class RoborockVacuumCard extends LitElement {
     if (action.mop_intensity_entity && action.mop_intensity) {
       await this._call("select", "select_option", { entity_id: action.mop_intensity_entity, option: action.mop_intensity });
     }
-    if (action.suction_entity && action.suction_level) {
-      await this._call("select", "select_option", { entity_id: action.suction_entity, option: action.suction_level });
+    if (action.suction_level) {
+      await this._call("vacuum", "set_fan_speed", { entity_id: vac.entity, fan_speed: action.suction_level });
     }
 
     const segments = selected.map((r) => r.segment_id).filter((id): id is number => id !== undefined);
@@ -480,9 +486,36 @@ export class RoborockVacuumCard extends LitElement {
     const bat = this._battery(vac);
     const lastClean = this._lastCleanStr(vac);
 
+    // Current room
+    const roomState = vac.current_room_entity
+      ? this.hass.states[vac.current_room_entity]?.state
+      : null;
+    const currentRoom = roomState && roomState !== "unknown" && roomState !== "unavailable"
+      ? roomState : null;
+
+    // Error
+    const errState = vac.error_entity
+      ? this.hass.states[vac.error_entity]?.state
+      : null;
+    const hasError = errState && errState !== "none" && errState !== "unknown" && errState !== "unavailable";
+
     return html`
+      ${hasError ? html`
+        <div class="error-row">
+          <ha-icon icon="mdi:alert-circle" style="color:#ff4d4f"></ha-icon>
+          <span style="color:#ff4d4f;font-size:12px;font-weight:600">${errState}</span>
+        </div>
+      ` : nothing}
       <div class="status-row">
-        <span class="status-label" style=${styleMap({ color: labelColor })}>${label}</span>
+        <div class="status-main">
+          <span class="status-label" style=${styleMap({ color: labelColor })}>${label}</span>
+          ${currentRoom ? html`
+            <span class="current-room">
+              <ha-icon icon="mdi:map-marker" style="--mdc-icon-size:13px;color:rgba(255,255,255,0.4)"></ha-icon>
+              ${currentRoom}
+            </span>
+          ` : nothing}
+        </div>
         <div class="status-meta">
           ${bat !== null ? html`
             <div class="battery">
@@ -620,7 +653,9 @@ export class RoborockVacuumCard extends LitElement {
 
     return html`
       <div class="status-card" style=${styleMap({ border: cardBorder, boxShadow: cardShadow })}>
-        <div class="status-left">
+        <div class="status-left" style="cursor:pointer"
+          @click=${() => this._fireMoreInfo(vac.entity)}
+          title="Open ${name} info">
           <div class="model-label">${name}</div>
           ${vac.image ? html`
             <img class="vac-img" src=${vac.image} alt=${name}
@@ -833,7 +868,15 @@ export class RoborockVacuumCard extends LitElement {
       padding: 8px 12px 4px 16px;
     }
 
+    .error-row {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 12px 0 16px; animation: pulse-error 2s ease-in-out infinite;
+    }
+    @keyframes pulse-error { 0%,100% { opacity:1; } 50% { opacity:0.6; } }
+
+    .status-main { display: flex; flex-direction: column; gap: 2px; }
     .status-label { font-size: 20px; font-weight: 700; }
+    .current-room { display: flex; align-items: center; gap: 3px; font-size: 11px; color: rgba(255,255,255,0.45); }
 
     .status-meta {
       display: flex;
