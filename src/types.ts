@@ -41,8 +41,7 @@ export interface RoomConfig {
   icon_anchor?: "none"|"tl"|"t"|"tr"|"l"|"c"|"r"|"bl"|"b"|"br";
   segment_id?: number;
   area_id?: string;
-  toggle_entity?: string;
-  clean_time_entity?: string;
+  clean_time_mins?: number;            // odhadovaný čas úklidu (minuty)
   last_clean_entity?: string;
   map_x: number;
   map_y: number;

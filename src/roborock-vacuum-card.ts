@@ -38,7 +38,7 @@ export class RoborockVacuumCard extends LitElement {
   @state() private _shownSet = new Set<number>([0]);
   /** ID of the button currently being held — drives the fill animation */
   @state() private _holdId: string | null = null;
-  /** Local selection state — fallback when toggle_entity chybí nebo neexistuje */
+  /** Výběr místností — drží se lokálně v kartě (bez potřeby input_boolean helper entity) */
   @state() private _localRoomSel = new Map<string, boolean>();
 
   private _holdTimer: ReturnType<typeof setTimeout> | null = null;
@@ -141,9 +141,6 @@ export class RoborockVacuumCard extends LitElement {
   }
 
   private _isRoomSelected(room: RoomConfig, vac: VacuumConfig): boolean {
-    if (room.toggle_entity && this.hass.states[room.toggle_entity]) {
-      return this.hass.states[room.toggle_entity].state === "on";
-    }
     return this._localRoomSel.get(vac.entity + ":" + room.key) ?? false;
   }
 
@@ -153,9 +150,8 @@ export class RoborockVacuumCard extends LitElement {
 
   private _totalCleanMins(vac: VacuumConfig): number {
     return (vac.rooms ?? []).reduce((sum, r) => {
-      if (!this._isRoomSelected(r, vac) || !r.clean_time_entity) return sum;
-      const t = parseFloat(this.hass.states[r.clean_time_entity]?.state ?? "0");
-      return sum + (isNaN(t) ? 0 : t);
+      if (!this._isRoomSelected(r, vac) || !r.clean_time_mins) return sum;
+      return sum + r.clean_time_mins;
     }, 0);
   }
 
@@ -296,14 +292,10 @@ export class RoborockVacuumCard extends LitElement {
   }
 
   private _toggleRoom(room: RoomConfig, vac: VacuumConfig): void {
-    if (room.toggle_entity && this.hass.states[room.toggle_entity]) {
-      this._call("input_boolean", "toggle", { entity_id: room.toggle_entity });
-    } else {
-      const k = vac.entity + ":" + room.key;
-      const next = new Map(this._localRoomSel);
-      next.set(k, !(next.get(k) ?? false));
-      this._localRoomSel = next;
-    }
+    const k = vac.entity + ":" + room.key;
+    const next = new Map(this._localRoomSel);
+    next.set(k, !(next.get(k) ?? false));
+    this._localRoomSel = next;
   }
 
   private async _startClean(vac: VacuumConfig): Promise<void> {
@@ -854,8 +846,6 @@ export class RoborockVacuumCard extends LitElement {
       width: 46px;
       height: 46px;
       border-radius: 12px;
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
       cursor: pointer;
       display: flex;
       align-items: center;
@@ -875,8 +865,6 @@ export class RoborockVacuumCard extends LitElement {
       cursor: pointer;
       display: flex;
       padding: 3px;
-      backdrop-filter: blur(2px);
-      -webkit-backdrop-filter: blur(2px);
       transition: background 0.2s, border 0.3s, box-shadow 0.3s;
     }
 

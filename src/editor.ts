@@ -595,10 +595,8 @@ export class RoborockVacuumCardEditor extends LitElement {
               }} />
           </div>
           <p class="hint">Find IDs via Developer Tools > Actions > roborock.get_maps</p>
-          ${this._entityPicker("Toggle entity (input_boolean)", room.toggle_entity, ["input_boolean"],
-            v => this._setRoom(vacIdx, roomIdx, { toggle_entity: v || undefined }))}
-          ${this._entityPicker("Clean time entity (input_number)", room.clean_time_entity, ["input_number"],
-            v => this._setRoom(vacIdx, roomIdx, { clean_time_entity: v || undefined }))}
+          ${this._numberSlider("Odhadovaný čas úklidu", room.clean_time_mins ?? 0, 0, 120, 1,
+            v => this._setRoom(vacIdx, roomIdx, { clean_time_mins: v > 0 ? v : undefined }), " min")}
           ${this._entityPicker("Last clean entity (input_datetime)", room.last_clean_entity, ["input_datetime"],
             v => this._setRoom(vacIdx, roomIdx, { last_clean_entity: v || undefined }))}
         </div>
