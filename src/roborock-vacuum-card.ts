@@ -9,6 +9,7 @@ import type {
   RoomConfig,
   RoomThreshold,
   NativeCleanAction,
+  NativeAreaCleanAction,
   ScriptCleanAction,
   GlobalAction,
   GlobalActionCall,
@@ -356,8 +357,8 @@ export class RoborockVacuumCard extends LitElement {
   }
 
   private _deriveCleanType(vac: VacuumConfig): "wet" | "dry" {
-    if (vac.clean_action?.type === "native") {
-      const na = vac.clean_action as NativeCleanAction;
+    if (vac.clean_action?.type === "native" || vac.clean_action?.type === "native-area") {
+      const na = vac.clean_action as NativeCleanAction | NativeAreaCleanAction;
       if (na.mop_mode_entity || na.mop_intensity_entity) return "wet";
     }
     return "dry";
@@ -465,6 +466,7 @@ export class RoborockVacuumCard extends LitElement {
     const selected = (vac.rooms ?? []).filter((r) => this._isRoomSelected(r, vac));
     if (selected.length === 0) return;
 
+    // Script strategy -- no in-flight tracking
     if (vac.clean_action.type === "script") {
       const action = vac.clean_action as ScriptCleanAction;
       const variables: Record<string, unknown> = {};
@@ -479,25 +481,37 @@ export class RoborockVacuumCard extends LitElement {
       return;
     }
 
-    const action = vac.clean_action as NativeCleanAction;
-    if (action.mop_mode_entity && action.mop_mode) {
-      await this._call("select", "select_option", { entity_id: action.mop_mode_entity, option: action.mop_mode });
+    // Native variants: pre-set fan / mop, then call vacuum
+    const nativeAction = vac.clean_action as NativeCleanAction | NativeAreaCleanAction;
+    if (nativeAction.mop_mode_entity && nativeAction.mop_mode) {
+      await this._call("select", "select_option", { entity_id: nativeAction.mop_mode_entity, option: nativeAction.mop_mode });
     }
-    if (action.mop_intensity_entity && action.mop_intensity) {
-      await this._call("select", "select_option", { entity_id: action.mop_intensity_entity, option: action.mop_intensity });
+    if (nativeAction.mop_intensity_entity && nativeAction.mop_intensity) {
+      await this._call("select", "select_option", { entity_id: nativeAction.mop_intensity_entity, option: nativeAction.mop_intensity });
     }
-    if (action.suction_level) {
-      await this._call("vacuum", "set_fan_speed", { entity_id: vac.entity, fan_speed: action.suction_level });
+    if (nativeAction.suction_level) {
+      await this._call("vacuum", "set_fan_speed", { entity_id: vac.entity, fan_speed: nativeAction.suction_level });
     }
 
-    const segments = selected.map((r) => r.segment_id).filter((id): id is number => id !== undefined);
-    await this._call("vacuum", "send_command", {
-      entity_id: vac.entity,
-      command: "app_segment_clean",
-      params: [{ segments, repeat: action.repeat ?? 1 }],
-    });
+    if (vac.clean_action.type === "native-area") {
+      // Uses HA vacuum.clean_area -- room.key sent directly as cleaning_area_id
+      await this.hass.callService(
+        "vacuum", "clean_area",
+        { cleaning_area_id: selected.map((r) => r.key) },
+        { entity_id: vac.entity },
+      );
+    } else {
+      // type === "native" -- uses roborock send_command with segment IDs
+      const action = vac.clean_action as NativeCleanAction;
+      const segments = selected.map((r) => r.segment_id).filter((id): id is number => id !== undefined);
+      await this._call("vacuum", "send_command", {
+        entity_id: vac.entity,
+        command: "app_segment_clean",
+        params: [{ segments, repeat: action.repeat ?? 1 }],
+      });
+    }
 
-    // Zaregistruj in-flight + vystřel event
+    // Register in-flight + fire event (shared for both native variants)
     const totalMins = this._totalCleanMins(vac);
     const vacLabel = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
     this._inFlight.set(vac.entity, {

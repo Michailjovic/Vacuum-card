@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-01
+
+### Added
+
+- **`native-area` clean strategy** — new `type: "native-area"` option in `clean_action`. Uses the HA `vacuum.clean_area` action introduced in the Roborock integration (≈ May 2026). The room `key` is sent directly as `cleaning_area_id`, so no `segment_id` is needed. Fan speed, mop mode and mop intensity are still pre-set before the action as usual. Repeat passes are not supported by `vacuum.clean_area` and are omitted for this strategy.
+
+### Changed
+
+- **Room accordion — visual fields moved to Maps tab** — `icon` and `icon_anchor` are no longer editable in the room accordion under the Vacuums tab. They are now part of the per-room detail in the Maps tab (below the position/overlay controls), keeping all map-related room settings in one place.
+- **Room accordion — Segment ID hidden for `native-area`** — when the vacuum's strategy is `native-area`, the Segment ID field and its hint are replaced by a note explaining that the room key is used directly.
+- **Maps tab room detail — section headers** — the room detail area now groups controls under explicit headers: *Position*, *Overlay mode*, and *Icon*.
+- **Maps tab hint text** — the clickable link in the room accordion now reads "Set position & icon in the Maps tab".
+- `CARD_VERSION` bumped to `0.9.0`.
+
+---
+
 ## [0.8.0] - 2026-06-01
 
 ### Added

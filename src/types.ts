@@ -62,13 +62,27 @@ export interface NativeCleanAction {
   mop_intensity?: string;
 }
 
+/**
+ * Uses the newer HA vacuum.clean_area action.
+ * room.key is sent directly as cleaning_area_id -- no segment_id needed.
+ * Repeat is not supported by vacuum.clean_area.
+ */
+export interface NativeAreaCleanAction {
+  type: "native-area";
+  suction_level?: string;
+  mop_mode_entity?: string;
+  mop_mode?: string;
+  mop_intensity_entity?: string;
+  mop_intensity?: string;
+}
+
 export interface ScriptCleanAction {
   type: "script";
   entity_id: string;
   variables?: Record<string, string>;
 }
 
-export type CleanAction = NativeCleanAction | ScriptCleanAction;
+export type CleanAction = NativeCleanAction | NativeAreaCleanAction | ScriptCleanAction;
 
 // ── Global action ─────────────────────────────────────────────────────────
 
