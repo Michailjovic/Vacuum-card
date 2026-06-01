@@ -18,6 +18,9 @@ A feature-rich [Lovelace](https://www.home-assistant.io/dashboards/) custom card
 - **Two clean action strategies**
   - `native` — `vacuum.send_command` with segment IDs; optional pre-set of mop mode / intensity / suction
   - `script` — calls any HA script with configurable variable mapping
+- **Global action badges** — cross-vacuum "whole flat" buttons with amber glow when any vacuum is running
+- **Hold-to-activate animation** — left-to-right fill shows hold progress on START, PAUSE, and RESUME
+- **Full GUI editor** — entity pickers, live map calibration, click-to-position room buttons
 
 ---
 
@@ -96,6 +99,33 @@ vacuums:
 | Key | Required | Description |
 |-----|----------|-------------|
 | `vacuums` | ✅ | Array of vacuum configurations |
+| `global_actions` | | Optional cross-vacuum action badges (e.g. "Whole flat") |
+
+### Global action
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `name` | ✅ | — | Label shown in the badge |
+| `image` | | — | Image path |
+| `color` | | `orange` | Accent colour: `green` / `blue` / `orange` |
+| `watch_entities` | | `[]` | Vacuum entities; any cleaning → badge glows |
+| `action.type` | ✅ | — | `script` or `service` |
+| `action.entity_id` | if script | — | `script.*` entity to call |
+| `action.service` | if service | — | `domain.service` string |
+
+```yaml
+global_actions:
+  - name: "🏠 Whole flat"
+    image: /local/Dashboards/Vacuum/celybyt.png
+    color: orange
+    watch_entities:
+      - vacuum.s6_kitchen
+      - vacuum.s7_kitchen
+      - vacuum.s8_maxv_ultra
+    action:
+      type: script
+      entity_id: script.celkovy_uklid_bytu
+```
 
 ### Vacuum
 
@@ -202,10 +232,12 @@ Use those numbers as `segment_id` in your room config.
 
 ## Roadmap
 
-| Version | Planned |
-|---------|---------|
-| v0.2.0 | Full GUI editor with entity pickers; interactive map calibration tool; drag-and-drop room button positioning |
-| v0.3.0 | Animated hold-to-activate progress indicator; per-room cleaning stats chart |
+| Version | Status | Highlights |
+|---------|--------|-----------|
+| v0.1.0 | ✅ Released | Core card, YAML editor |
+| v0.2.0 | ✅ Released | Full GUI editor, map calibration, click-to-position rooms |
+| v0.3.0 | ✅ Released | Hold animation, global action badges, room icons in START button |
+| v0.4.0 | Planned | Per-room cleaning history chart; drag-to-reorder rooms; `roborock.get_maps` auto-import |
 
 ---
 
@@ -221,8 +253,8 @@ npm run typecheck    # TypeScript only, no emit
 To create a release, push a version tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 GitHub Actions builds the dist file and attaches it to the release automatically.

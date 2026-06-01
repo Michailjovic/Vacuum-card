@@ -9,6 +9,8 @@ import type {
   RoomConfig,
   NativeCleanAction,
   ScriptCleanAction,
+  GlobalAction,
+  GlobalActionCall,
 } from "./types";
 import {
   CARD_NAME,
@@ -33,6 +35,8 @@ export class RoborockVacuumCard extends LitElement {
   @property({ attribute: false }) hass!: HomeAssistant;
   @state() private _config!: RoborockVacuumCardConfig;
   @state() private _activeIndex = 0;
+  /** ID of the button currently being held — drives the fill animation */
+  @state() private _holdId: string | null = null;
 
   private _holdTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -62,7 +66,6 @@ export class RoborockVacuumCard extends LitElement {
       throw new Error("[roborock-vacuum-card] 'vacuums' must be a non-empty array");
     }
     this._config = config;
-    // Clamp active index in case vacuums list shrank during edit
     if (this._activeIndex >= config.vacuums.length) {
       this._activeIndex = 0;
     }
@@ -87,6 +90,10 @@ export class RoborockVacuumCard extends LitElement {
 
   private _color(vac: VacuumConfig): string {
     return COLOR_HEX[vac.color ?? "green"] ?? COLOR_HEX["green"];
+  }
+
+  private _colorKey(vac: VacuumConfig): string {
+    return vac.color ?? "green";
   }
 
   private _statusInfo(vac: VacuumConfig): readonly [string, string] {
@@ -118,9 +125,9 @@ export class RoborockVacuumCard extends LitElement {
     const d = new Date(raw);
     const diff = Math.floor((Date.now() - d.getTime()) / 86_400_000);
     const t = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    if (diff === 0) return `Today · ${t}`;
-    if (diff === 1) return `Yesterday · ${t}`;
-    return `${d.toLocaleDateString([], { day: "2-digit", month: "2-digit" })} · ${t}`;
+    if (diff === 0) return "Today · " + t;
+    if (diff === 1) return "Yesterday · " + t;
+    return d.toLocaleDateString([], { day: "2-digit", month: "2-digit" }) + " · " + t;
   }
 
   private _progress(vac: VacuumConfig): number | null {
@@ -183,8 +190,34 @@ export class RoborockVacuumCard extends LitElement {
 
   private _timeStr(mins: number): string {
     if (mins <= 0) return "";
-    if (mins >= 60) return `~${Math.floor(mins / 60)} h ${Math.round(mins % 60)} min`;
-    return `~${Math.round(mins)} min`;
+    if (mins >= 60) return "~" + Math.floor(mins / 60) + " h " + Math.round(mins % 60) + " min";
+    return "~" + Math.round(mins) + " min";
+  }
+
+  // ── Global action helpers ───────────────────────────────────────────────
+
+  /** True if any watched entity is in a cleaning state */
+  private _isGlobalActive(ga: GlobalAction): boolean {
+    return (ga.watch_entities ?? []).some((e) =>
+      CLEANING_STATES.has(this.hass.states[e]?.state ?? "")
+    );
+  }
+
+  private async _triggerGlobal(ga: GlobalAction): Promise<void> {
+    const action = ga.action;
+    try {
+      if (action.type === "script") {
+        await this.hass.callService("script", "turn_on", {
+          entity_id: action.entity_id,
+          variables: action.variables ?? {},
+        });
+      } else {
+        const [domain, svc] = action.service.split(".");
+        await this.hass.callService(domain, svc, action.data ?? {});
+      }
+    } catch (err) {
+      console.error("[roborock-vacuum-card] global action failed:", err);
+    }
   }
 
   // ── Hold-action helpers ─────────────────────────────────────────────────
@@ -194,18 +227,22 @@ export class RoborockVacuumCard extends LitElement {
       clearTimeout(this._holdTimer);
       this._holdTimer = null;
     }
+    this._holdId = null;
   }
 
   /**
-   * Returns a pointerdown handler that fires `action` after HOLD_DURATION_MS.
-   * Must be paired with _holdEnd on pointerup / pointerleave / pointercancel.
+   * Returns a pointerdown handler that:
+   *  1. Sets _holdId to `id` (triggers fill animation)
+   *  2. Fires `action` after HOLD_DURATION_MS
    */
-  private _holdStart(action: () => void) {
+  private _holdStart(id: string, action: () => void) {
     return (e: PointerEvent): void => {
       e.preventDefault();
       this._cancelHold();
+      this._holdId = id;
       this._holdTimer = setTimeout(() => {
         this._holdTimer = null;
+        this._holdId = null;
         action();
       }, HOLD_DURATION_MS);
     };
@@ -221,7 +258,7 @@ export class RoborockVacuumCard extends LitElement {
     try {
       await this.hass.callService(domain, service, data);
     } catch (err) {
-      console.error(`[roborock-vacuum-card] ${domain}.${service} failed:`, err);
+      console.error("[roborock-vacuum-card] " + domain + "." + service + " failed:", err);
     }
   }
 
@@ -263,9 +300,7 @@ export class RoborockVacuumCard extends LitElement {
       return;
     }
 
-    // Native Roborock strategy
     const action = vac.clean_action as NativeCleanAction;
-
     if (action.mop_mode_entity && action.mop_mode) {
       await this._call("select", "select_option", { entity_id: action.mop_mode_entity, option: action.mop_mode });
     }
@@ -284,31 +319,25 @@ export class RoborockVacuumCard extends LitElement {
     });
   }
 
-  // ── Render helpers ──────────────────────────────────────────────────────
+  // ── Render: badges ──────────────────────────────────────────────────────
 
   private _renderBadge(vac: VacuumConfig, index: number) {
     const active = index === this._activeIndex;
     const cleaning = this._isCleaning(vac);
     const color = this._color(vac);
-    const colorKey = vac.color ?? "green";
+    const ck = this._colorKey(vac);
     const name = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
 
-    const bg = cleaning
-      ? COLOR_BG_ACTIVE[colorKey]
-      : active
-      ? COLOR_BG[colorKey]
-      : "rgba(30,30,30,0.85)";
-
+    const bg = cleaning ? COLOR_BG_ACTIVE[ck] : active ? COLOR_BG[ck] : "rgba(30,30,30,0.85)";
     const border = cleaning
-      ? `3px solid ${color}`
+      ? "3px solid " + color
       : active
-      ? `2px solid ${color}80`
+      ? "2px solid " + color + "80"
       : "2px solid rgba(255,255,255,0.18)";
-
     const shadow = cleaning
-      ? `0 0 18px ${color}B0`
+      ? "0 0 18px " + color + "B0"
       : active
-      ? `0 0 8px ${color}50`
+      ? "0 0 8px " + color + "50"
       : "none";
 
     return html`
@@ -329,6 +358,41 @@ export class RoborockVacuumCard extends LitElement {
     `;
   }
 
+  private _renderGlobalBadge(ga: GlobalAction, idx: number) {
+    const active = this._isGlobalActive(ga);
+    const color = COLOR_HEX[ga.color ?? "orange"];
+    const ck = ga.color ?? "orange";
+    const holdId = "global-" + idx;
+    const holding = this._holdId === holdId;
+
+    const bg = active ? COLOR_BG_ACTIVE[ck] : "rgba(30,30,30,0.85)";
+    const border = active ? "3px solid " + color : "2px solid rgba(255,255,255,0.18)";
+    const shadow = active ? "0 0 18px " + color + "B0" : "none";
+
+    return html`
+      <button
+        class="badge badge--global ${holding ? "badge--holding" : ""}"
+        style=${styleMap({ background: bg, border, boxShadow: shadow })}
+        @pointerdown=${this._holdStart(holdId, () => this._triggerGlobal(ga))}
+        @pointerup=${this._holdEnd}
+        @pointerleave=${this._holdEnd}
+        @pointercancel=${this._holdEnd}
+        aria-label=${ga.name}
+        title=${"Hold to trigger: " + ga.name}
+      >
+        <div class="hold-ring"></div>
+        ${ga.image
+          ? html`<img class="badge-img" src=${ga.image} alt=${ga.name} />`
+          : html`<ha-icon class="badge-icon" icon="mdi:home-floor-a" style=${styleMap({ color })}></ha-icon>`}
+        <span class="badge-name" style=${styleMap({ color: active ? "white" : "rgba(255,255,255,0.55)" })}>
+          ${ga.name}
+        </span>
+      </button>
+    `;
+  }
+
+  // ── Render: map ─────────────────────────────────────────────────────────
+
   private _renderMap(vac: VacuumConfig) {
     if (!vac.map) return nothing;
     const { entity, rotation = 0, scale = 100, offset_x = 0, offset_y = 0 } = vac.map;
@@ -342,10 +406,10 @@ export class RoborockVacuumCard extends LitElement {
           src=${url}
           alt="Vacuum map"
           style=${styleMap({
-            left: `${50 + offset_x}%`,
-            top: `${50 + offset_y}%`,
-            width: `${scale}%`,
-            transform: `translate(-50%,-50%) rotate(${rotation}deg)`,
+            left: (50 + offset_x) + "%",
+            top:  (50 + offset_y) + "%",
+            width: scale + "%",
+            transform: "translate(-50%,-50%) rotate(" + rotation + "deg)",
           })}
         />
         ${(vac.rooms ?? []).map((r) => this._renderRoomBtn(r, vac))}
@@ -357,17 +421,17 @@ export class RoborockVacuumCard extends LitElement {
     const selected = this._isRoomSelected(room);
     const color = this._color(vac);
     const border = this._roomBorderColor(room);
-    const bg = selected ? `${color}A8` : "rgba(0,0,0,0.55)";
-    const shadow = selected ? `0 0 12px ${color}80` : "none";
+    const bg = selected ? color + "A8" : "rgba(0,0,0,0.55)";
+    const shadow = selected ? "0 0 12px " + color + "80" : "none";
 
     return html`
       <button
         class="room-btn"
         style=${styleMap({
-          left: `${room.map_x}%`,
-          top: `${room.map_y}%`,
+          left: room.map_x + "%",
+          top:  room.map_y + "%",
           background: bg,
-          border: `4px solid ${border}`,
+          border: "4px solid " + border,
           boxShadow: shadow,
         })}
         @click=${() => this._toggleRoom(room)}
@@ -375,13 +439,12 @@ export class RoborockVacuumCard extends LitElement {
         aria-label=${room.name}
         aria-pressed=${selected ? "true" : "false"}
       >
-        <ha-icon
-          icon=${room.icon}
-          style=${styleMap({ color: selected ? "white" : "rgba(255,255,255,0.5)" })}
-        ></ha-icon>
+        <ha-icon icon=${room.icon} style=${styleMap({ color: selected ? "white" : "rgba(255,255,255,0.5)" })}></ha-icon>
       </button>
     `;
   }
+
+  // ── Render: status card ─────────────────────────────────────────────────
 
   private _renderStatusRow(vac: VacuumConfig) {
     const [label, labelColor] = this._statusInfo(vac);
@@ -414,7 +477,7 @@ export class RoborockVacuumCard extends LitElement {
     return html`
       <div class="progress">
         <div class="progress-track">
-          <div class="progress-fill" style=${styleMap({ width: `${prog}%`, background: color })}></div>
+          <div class="progress-fill" style=${styleMap({ width: prog + "%", background: color })}></div>
         </div>
         <span class="progress-label" style=${styleMap({ color })}>${prog}&thinsp;%</span>
       </div>
@@ -426,22 +489,24 @@ export class RoborockVacuumCard extends LitElement {
     const paused = this._isPaused(vac);
     const hasRooms = this._hasSelectedRooms(vac);
     const color = this._color(vac);
-    const colorKey = vac.color ?? "green";
+    const ck = this._colorKey(vac);
     const mins = this._totalCleanMins(vac);
     const timeStr = this._timeStr(mins);
+    const vacIdx = this._activeIndex;
 
-    // ── Paused state ──────────────────────────────────────────────────
     if (paused) {
+      const hId = "resume-" + vacIdx;
       return html`
         <div class="actions">
           <button
-            class="action-btn"
-            style=${styleMap({ background: COLOR_BG[colorKey], border: `1px solid ${color}80` })}
-            @pointerdown=${this._holdStart(() => this._resume(vac))}
+            class="action-btn ${this._holdId === hId ? "action-btn--holding" : ""}"
+            style=${styleMap({ background: COLOR_BG[ck], border: "1px solid " + color + "80" })}
+            @pointerdown=${this._holdStart(hId, () => this._resume(vac))}
             @pointerup=${this._holdEnd}
             @pointerleave=${this._holdEnd}
             @pointercancel=${this._holdEnd}
           >
+            <div class="hold-ring"></div>
             <ha-icon icon="mdi:play" style=${styleMap({ color })}></ha-icon>
             <span>Resume</span>
           </button>
@@ -456,17 +521,18 @@ export class RoborockVacuumCard extends LitElement {
       `;
     }
 
-    // ── Cleaning state ────────────────────────────────────────────────
     if (cleaning) {
+      const hId = "pause-" + vacIdx;
       return html`
         <div class="actions">
           <button
-            class="action-btn action-btn--warn"
-            @pointerdown=${this._holdStart(() => this._pause(vac))}
+            class="action-btn action-btn--warn ${this._holdId === hId ? "action-btn--holding" : ""}"
+            @pointerdown=${this._holdStart(hId, () => this._pause(vac))}
             @pointerup=${this._holdEnd}
             @pointerleave=${this._holdEnd}
             @pointercancel=${this._holdEnd}
           >
+            <div class="hold-ring"></div>
             <ha-icon icon="mdi:pause" style="color:#faad14"></ha-icon>
             <span>Pause</span>
           </button>
@@ -474,29 +540,38 @@ export class RoborockVacuumCard extends LitElement {
       `;
     }
 
-    // ── Idle state ────────────────────────────────────────────────────
-    const startBg = hasRooms ? COLOR_BG[colorKey] : "rgba(60,60,60,0.4)";
-    const startBorder = hasRooms ? `1px solid ${color}80` : "1px solid rgba(255,255,255,0.1)";
+    const hId = "start-" + vacIdx;
+    const startBg = hasRooms ? COLOR_BG[ck] : "rgba(60,60,60,0.4)";
+    const startBorder = hasRooms ? "1px solid " + color + "80" : "1px solid rgba(255,255,255,0.1)";
     const startIconColor = hasRooms ? color : "rgba(255,255,255,0.2)";
     const startTextColor = hasRooms ? "white" : "rgba(255,255,255,0.25)";
 
     return html`
       <div class="actions">
         <button
-          class="action-btn"
+          class="action-btn ${hasRooms && this._holdId === hId ? "action-btn--holding" : ""}"
           style=${styleMap({ background: startBg, border: startBorder })}
           ?disabled=${!hasRooms}
-          @pointerdown=${hasRooms ? this._holdStart(() => this._startClean(vac)) : nothing}
+          @pointerdown=${hasRooms ? this._holdStart(hId, () => this._startClean(vac)) : nothing}
           @pointerup=${this._holdEnd}
           @pointerleave=${this._holdEnd}
           @pointercancel=${this._holdEnd}
         >
+          <div class="hold-ring"></div>
           <ha-icon icon="mdi:rocket-launch" style=${styleMap({ color: startIconColor })}></ha-icon>
           <div class="start-body">
             <span style=${styleMap({ color: startTextColor })}>START</span>
-            ${timeStr
-              ? html`<small style="color:rgba(255,255,255,0.4)">${timeStr}</small>`
-              : nothing}
+            ${(vac.rooms ?? []).length > 0 ? html`
+              <div class="room-icons">
+                ${(vac.rooms ?? []).map(r => html`
+                  <ha-icon
+                    icon=${r.icon || "mdi:square"}
+                    style=${styleMap({ color: this._isRoomSelected(r) ? color : "rgba(255,255,255,0.15)" })}
+                  ></ha-icon>
+                `)}
+              </div>
+            ` : nothing}
+            ${timeStr ? html`<small style="color:rgba(255,255,255,0.4)">${timeStr}</small>` : nothing}
           </div>
         </button>
       </div>
@@ -506,42 +581,28 @@ export class RoborockVacuumCard extends LitElement {
   private _renderStatusCard(vac: VacuumConfig) {
     const cleaning = this._isCleaning(vac);
     const color = this._color(vac);
-    const colorKey = vac.color ?? "green";
     const name = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
 
-    const cardBorder = cleaning
-      ? `2px solid ${color}`
-      : "1px solid rgba(255,255,255,0.08)";
-    const cardShadow = cleaning ? `0 0 22px ${color}40` : "none";
+    const cardBorder = cleaning ? "2px solid " + color : "1px solid rgba(255,255,255,0.08)";
+    const cardShadow = cleaning ? "0 0 22px " + color + "40" : "none";
     const imgFilter = cleaning
-      ? `drop-shadow(0 0 20px ${color}D8)`
-      : `drop-shadow(0 4px 12px ${color}33)`;
+      ? "drop-shadow(0 0 20px " + color + "D8)"
+      : "drop-shadow(0 4px 12px " + color + "33)";
 
     return html`
-      <div
-        class="status-card"
-        style=${styleMap({ border: cardBorder, boxShadow: cardShadow })}
-      >
+      <div class="status-card" style=${styleMap({ border: cardBorder, boxShadow: cardShadow })}>
         <div class="status-left">
           <div class="model-label">${name}</div>
           ${vac.image ? html`
-            <img
-              class="vac-img"
-              src=${vac.image}
-              alt=${name}
-              style=${styleMap({
-                opacity: cleaning ? "0.9" : "0.6",
-                filter: imgFilter,
-              })}
+            <img class="vac-img" src=${vac.image} alt=${name}
+              style=${styleMap({ opacity: cleaning ? "0.9" : "0.6", filter: imgFilter })}
             />
           ` : html`
-            <ha-icon
-              icon="mdi:robot-vacuum"
+            <ha-icon icon="mdi:robot-vacuum"
               style=${styleMap({ color, fontSize: "80px", opacity: cleaning ? "0.9" : "0.5" })}
             ></ha-icon>
           `}
         </div>
-
         <div class="status-right">
           ${this._renderStatusRow(vac)}
           ${this._renderProgress(vac)}
@@ -562,6 +623,7 @@ export class RoborockVacuumCard extends LitElement {
       <ha-card>
         <div class="badges-row">
           ${this._config.vacuums.map((v, i) => this._renderBadge(v, i))}
+          ${(this._config.global_actions ?? []).map((ga, i) => this._renderGlobalBadge(ga, i))}
         </div>
         ${this._renderMap(vac)}
         ${this._renderStatusCard(vac)}
@@ -582,7 +644,7 @@ export class RoborockVacuumCard extends LitElement {
       gap: 8px;
     }
 
-    /* ── Badges ────────────────────────────────────────────────────── */
+    /* ── Badges ──────────────────────────────────────────────────────── */
     .badges-row {
       display: flex;
       flex-wrap: wrap;
@@ -590,6 +652,8 @@ export class RoborockVacuumCard extends LitElement {
     }
 
     .badge {
+      position: relative;
+      overflow: hidden;
       display: flex;
       align-items: center;
       gap: 10px;
@@ -607,6 +671,8 @@ export class RoborockVacuumCard extends LitElement {
       border-radius: 50%;
       object-fit: cover;
       flex-shrink: 0;
+      position: relative;
+      z-index: 1;
     }
 
     .badge-icon {
@@ -615,6 +681,8 @@ export class RoborockVacuumCard extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
+      position: relative;
+      z-index: 1;
     }
 
     .badge-name {
@@ -622,13 +690,36 @@ export class RoborockVacuumCard extends LitElement {
       font-weight: 700;
       white-space: nowrap;
       transition: color 0.3s;
+      position: relative;
+      z-index: 1;
     }
 
-    /* ── Map ────────────────────────────────────────────────────────── */
+    /* ── Hold ring (shared by badges and action buttons) ─────────────── */
+    .hold-ring {
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background: rgba(255, 255, 255, 0.18);
+      transform: scaleX(0);
+      transform-origin: left;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .action-btn--holding .hold-ring,
+    .badge--holding .hold-ring {
+      animation: hold-fill var(--hold-ms) linear forwards;
+    }
+
+    @keyframes hold-fill {
+      from { transform: scaleX(0); }
+      to   { transform: scaleX(1); }
+    }
+
+    /* ── Map ─────────────────────────────────────────────────────────── */
     .map-wrap {
       position: relative;
       width: 100%;
-      /* 16:4.4 aspect ratio matching the SVG placeholder */
       padding-top: 27.5%;
       overflow: hidden;
       border-radius: 12px;
@@ -640,7 +731,7 @@ export class RoborockVacuumCard extends LitElement {
       object-fit: cover;
     }
 
-    /* ── Room buttons ───────────────────────────────────────────────── */
+    /* ── Room buttons ────────────────────────────────────────────────── */
     .room-btn {
       position: absolute;
       width: 46px;
@@ -660,11 +751,10 @@ export class RoborockVacuumCard extends LitElement {
       --mdc-icon-size: 22px;
     }
 
-    /* ── Status card ────────────────────────────────────────────────── */
+    /* ── Status card ─────────────────────────────────────────────────── */
     .status-card {
       display: grid;
       grid-template-columns: 150px 1fr;
-      grid-template-rows: auto;
       background: rgba(0, 0, 0, 0.6);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
@@ -704,7 +794,7 @@ export class RoborockVacuumCard extends LitElement {
       gap: 4px;
     }
 
-    /* ── Status row ─────────────────────────────────────────────────── */
+    /* ── Status row ──────────────────────────────────────────────────── */
     .status-row {
       display: flex;
       align-items: flex-start;
@@ -712,10 +802,7 @@ export class RoborockVacuumCard extends LitElement {
       padding: 8px 12px 4px 16px;
     }
 
-    .status-label {
-      font-size: 20px;
-      font-weight: 700;
-    }
+    .status-label { font-size: 20px; font-weight: 700; }
 
     .status-meta {
       display: flex;
@@ -725,67 +812,30 @@ export class RoborockVacuumCard extends LitElement {
       flex-shrink: 0;
     }
 
-    .battery {
-      display: flex;
-      align-items: center;
-      gap: 3px;
-      font-size: 11px;
-      font-weight: 600;
-    }
-
-    .battery ha-icon {
-      --mdc-icon-size: 15px;
-    }
+    .battery { display: flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 600; }
+    .battery ha-icon { --mdc-icon-size: 15px; }
 
     .last-clean {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 11px;
-      color: rgba(255, 255, 255, 0.45);
+      display: flex; align-items: center; gap: 4px;
+      font-size: 11px; color: rgba(255, 255, 255, 0.45);
     }
+    .last-clean ha-icon { --mdc-icon-size: 12px; color: rgba(255, 255, 255, 0.25); }
 
-    .last-clean ha-icon {
-      --mdc-icon-size: 12px;
-      color: rgba(255, 255, 255, 0.25);
-    }
-
-    /* ── Progress bar ───────────────────────────────────────────────── */
-    .progress {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 0 16px 4px;
-    }
-
+    /* ── Progress bar ────────────────────────────────────────────────── */
+    .progress { display: flex; align-items: center; gap: 8px; padding: 0 16px 4px; }
     .progress-track {
-      flex: 1;
-      height: 3px;
-      background: rgba(255, 255, 255, 0.08);
-      border-radius: 2px;
-      overflow: hidden;
+      flex: 1; height: 3px;
+      background: rgba(255, 255, 255, 0.08); border-radius: 2px; overflow: hidden;
     }
+    .progress-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+    .progress-label { font-size: 11px; font-weight: 600; flex-shrink: 0; }
 
-    .progress-fill {
-      height: 100%;
-      border-radius: 2px;
-      transition: width 0.5s ease;
-    }
-
-    .progress-label {
-      font-size: 11px;
-      font-weight: 600;
-      flex-shrink: 0;
-    }
-
-    /* ── Action buttons ─────────────────────────────────────────────── */
-    .actions {
-      display: flex;
-      gap: 8px;
-      padding: 0 12px 14px;
-    }
+    /* ── Action buttons ──────────────────────────────────────────────── */
+    .actions { display: flex; gap: 8px; padding: 0 12px 14px; }
 
     .action-btn {
+      position: relative;
+      overflow: hidden;
       flex: 1;
       display: flex;
       align-items: center;
@@ -798,21 +848,10 @@ export class RoborockVacuumCard extends LitElement {
       font-family: inherit;
     }
 
-    .action-btn:disabled {
-      cursor: default;
-      opacity: 0.7;
-    }
+    .action-btn:disabled { cursor: default; opacity: 0.7; }
 
-    .action-btn ha-icon {
-      --mdc-icon-size: 22px;
-      flex-shrink: 0;
-    }
-
-    .action-btn span {
-      font-size: 14px;
-      font-weight: 700;
-      color: white;
-    }
+    .action-btn ha-icon { --mdc-icon-size: 22px; flex-shrink: 0; position: relative; z-index: 1; }
+    .action-btn span { font-size: 14px; font-weight: 700; color: white; position: relative; z-index: 1; }
 
     .action-btn--secondary {
       background: rgba(64, 169, 255, 0.08);
@@ -824,25 +863,37 @@ export class RoborockVacuumCard extends LitElement {
       border: 1px solid rgba(250, 173, 20, 0.5) !important;
     }
 
+    /* ── Start button body ───────────────────────────────────────────── */
     .start-body {
       display: flex;
       flex-direction: column;
       align-items: flex-start;
       gap: 2px;
+      position: relative;
+      z-index: 1;
     }
 
-    .start-body small {
-      font-size: 10px;
+    .start-body small { font-size: 10px; }
+
+    .room-icons {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 1px;
     }
+
+    .room-icons ha-icon { --mdc-icon-size: 14px; }
   `;
 }
 
-// Register with Lovelace custom card registry
+// Expose CSS variable for hold duration so CSS animation matches JS timer
+document.documentElement.style.setProperty("--hold-ms", HOLD_DURATION_MS + "ms");
+
 (window as Window & { customCards?: Array<Record<string, unknown>> }).customCards ??= [];
 (window as Window & { customCards?: Array<Record<string, unknown>> }).customCards!.push({
   type: CARD_NAME,
   name: "Roborock Vacuum Card",
-  description: "Feature-rich card for Roborock vacuums — map, room selection, multi-vacuum tabs.",
+  description: "Feature-rich card for Roborock vacuums — map, room selection, multi-vacuum tabs, global actions.",
   preview: false,
   documentationURL: "https://github.com/Michailjovic/Vacuum-card",
 });

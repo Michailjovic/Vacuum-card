@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-06-01
+
+### Added
+
+- **Hold animation** — action buttons (START, PAUSE, RESUME) and global-action badges now show a left-to-right fill animation during the 600 ms hold. The animation duration is driven by the same `HOLD_DURATION_MS` constant as the JS timer, so they are always in sync.
+- **Global action badges** — new top-level `global_actions` config key. Each entry renders as a pill badge alongside the vacuum badges. The badge glows amber when any of its `watch_entities` is in a cleaning state, and triggers its action on hold. Supports `script` and `service` call types.
+- **Room icons in START button** — the idle START button now shows a row of small room icons below the label. Each icon is bright (accent colour) when the room is selected, dimmed when not — matching the behaviour of the original YAML implementation.
+- **Global actions editor** — fourth navigation level in the config editor: vacuum list → global action list → global action detail. Supports name, image, colour, watch entities (entity pickers), and action (script entity or service string).
+
+### Changed
+
+- `_holdStart` now takes an `id: string` parameter. The active hold ID is tracked in `@state() _holdId`, which drives the CSS animation class on the correct button — no more single `window._ht` race condition even with multiple vacuums and global badges all in the same view.
+- `CARD_VERSION` bumped to `0.3.0`.
+
+---
+
 ## [0.2.0] - 2026-05-31
 
 ### Added
