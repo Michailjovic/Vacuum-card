@@ -34,7 +34,7 @@ console.info(
 export class RoborockVacuumCard extends LitElement {
   @property({ attribute: false }) hass!: HomeAssistant;
   @state() private _config!: RoborockVacuumCardConfig;
-  @state() private _activeIndex = 0;
+  @state() private _shownSet = new Set<number>([0]);
   /** ID of the button currently being held — drives the fill animation */
   @state() private _holdId: string | null = null;
 
@@ -66,9 +66,9 @@ export class RoborockVacuumCard extends LitElement {
       throw new Error("[roborock-vacuum-card] 'vacuums' must be a non-empty array");
     }
     this._config = config;
-    if (this._activeIndex >= config.vacuums.length) {
-      this._activeIndex = 0;
-    }
+    const valid = new Set<number>();
+    for (const i of this._shownSet) { if (i < config.vacuums.length) valid.add(i); }
+    this._shownSet = valid.size > 0 ? valid : new Set([0]);
   }
 
   getCardSize(): number {
@@ -85,7 +85,8 @@ export class RoborockVacuumCard extends LitElement {
   // ── Helpers ─────────────────────────────────────────────────────────────
 
   private _vac(): VacuumConfig {
-    return this._config.vacuums[this._activeIndex];
+    const first = [...this._shownSet][0] ?? 0;
+    return this._config.vacuums[first];
   }
 
   private _color(vac: VacuumConfig): string {
@@ -252,6 +253,13 @@ export class RoborockVacuumCard extends LitElement {
     this._cancelHold();
   };
 
+  private _toggleShown(index: number): void {
+    const next = new Set(this._shownSet);
+    if (next.has(index)) { if (next.size > 1) next.delete(index); }
+    else { next.add(index); }
+    this._shownSet = next;
+  }
+
   // ── Service calls ───────────────────────────────────────────────────────
 
   private async _call(domain: string, service: string, data: Record<string, unknown>): Promise<void> {
@@ -322,11 +330,12 @@ export class RoborockVacuumCard extends LitElement {
   // ── Render: badges ──────────────────────────────────────────────────────
 
   private _renderBadge(vac: VacuumConfig, index: number) {
-    const active = index === this._activeIndex;
+    const active = this._shownSet.has(index);
     const cleaning = this._isCleaning(vac);
     const color = this._color(vac);
     const ck = this._colorKey(vac);
     const name = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
+    const holding = this._holdId === "badge-" + index;
 
     const bg = cleaning ? COLOR_BG_ACTIVE[ck] : active ? COLOR_BG[ck] : "rgba(30,30,30,0.85)";
     const border = cleaning
@@ -342,12 +351,32 @@ export class RoborockVacuumCard extends LitElement {
 
     return html`
       <button
-        class="badge"
+        class="badge ${holding ? "badge--holding" : ""}"
         style=${styleMap({ background: bg, border, boxShadow: shadow })}
-        @click=${() => { this._activeIndex = index; }}
+        @pointerdown=${(e: PointerEvent) => {
+          e.preventDefault();
+          this._cancelHold();
+          this._holdId = "badge-" + index;
+          this._holdTimer = setTimeout(() => {
+            this._holdTimer = null;
+            this._holdId = null;
+            this._toggleShown(index);
+          }, HOLD_DURATION_MS);
+        }}
+        @pointerup=${() => {
+          if (this._holdTimer !== null) {
+            this._cancelHold();
+            this._shownSet = new Set([index]);
+          } else {
+            this._holdId = null;
+          }
+        }}
+        @pointerleave=${this._holdEnd}
+        @pointercancel=${this._holdEnd}
         aria-pressed=${active ? "true" : "false"}
         aria-label=${name}
       >
+        <div class="hold-ring"></div>
         ${vac.image
           ? html`<img class="badge-img" src=${vac.image} alt=${name} />`
           : html`<ha-icon class="badge-icon" icon="mdi:robot-vacuum" style=${styleMap({ color })}></ha-icon>`}
@@ -484,7 +513,7 @@ export class RoborockVacuumCard extends LitElement {
     `;
   }
 
-  private _renderActions(vac: VacuumConfig) {
+  private _renderActions(vac: VacuumConfig, vacIdx: number) {
     const cleaning = this._isCleaning(vac);
     const paused = this._isPaused(vac);
     const hasRooms = this._hasSelectedRooms(vac);
@@ -492,7 +521,7 @@ export class RoborockVacuumCard extends LitElement {
     const ck = this._colorKey(vac);
     const mins = this._totalCleanMins(vac);
     const timeStr = this._timeStr(mins);
-    const vacIdx = this._activeIndex;
+
 
     if (paused) {
       const hId = "resume-" + vacIdx;
@@ -578,7 +607,7 @@ export class RoborockVacuumCard extends LitElement {
     `;
   }
 
-  private _renderStatusCard(vac: VacuumConfig) {
+  private _renderStatusCard(vac: VacuumConfig, vacIdx: number) {
     const cleaning = this._isCleaning(vac);
     const color = this._color(vac);
     const name = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
@@ -606,7 +635,7 @@ export class RoborockVacuumCard extends LitElement {
         <div class="status-right">
           ${this._renderStatusRow(vac)}
           ${this._renderProgress(vac)}
-          ${this._renderActions(vac)}
+          ${this._renderActions(vac, vacIdx)}
         </div>
       </div>
     `;
@@ -616,8 +645,6 @@ export class RoborockVacuumCard extends LitElement {
 
   render() {
     if (!this._config || !this.hass) return nothing;
-    const vac = this._vac();
-    if (!vac) return nothing;
 
     return html`
       <ha-card>
@@ -625,8 +652,12 @@ export class RoborockVacuumCard extends LitElement {
           ${this._config.vacuums.map((v, i) => this._renderBadge(v, i))}
           ${(this._config.global_actions ?? []).map((ga, i) => this._renderGlobalBadge(ga, i))}
         </div>
-        ${this._renderMap(vac)}
-        ${this._renderStatusCard(vac)}
+        ${[...this._shownSet]
+          .filter(i => i < this._config.vacuums.length)
+          .map(i => html`
+            ${this._renderMap(this._config.vacuums[i])}
+            ${this._renderStatusCard(this._config.vacuums[i], i)}
+          `)}
       </ha-card>
     `;
   }

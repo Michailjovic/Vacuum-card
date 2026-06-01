@@ -172,7 +172,8 @@ export class RoborockVacuumCardEditor extends LitElement {
         <label>${label}${required ? html`<span class="required"> *</span>` : nothing}</label>
         <input class="text-input" type="text" list="ha-entities"
           .value=${value ?? ""} placeholder=${ph}
-          @change=${(e: Event) => onChange((e.target as HTMLInputElement).value)} />
+          @input=${(e: Event) => { const v = (e.target as HTMLInputElement).value;
+            if (v === "" || this.hass.states[v]) onChange(v); }} />
       </div>`;
   }
 
