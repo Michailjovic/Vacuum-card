@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-06-02
+
+### Added
+
+- **`repeat` support for `native-area` strategy** — the `repeat` field is now available on `native-area` clean actions. The value is passed as `times: N` in the `vacuum.clean_area` service call data (supported by Roborock HA integration ≥ May 2026). The editor shows a *Repeat passes* slider (1–3) identical to the one in the `native` strategy.
+
+---
+
+## [0.9.2] - 2026-06-02
+
+### Added
+
+- **Global area mappings** — new top-level `area_mappings` config key. Maps room keys (e.g. `obyvak`) to HA area IDs (e.g. `living_room`) once, shared across all vacuums. Used by the `native-area` strategy when calling `vacuum.clean_area`. Per-room `area_id` still works as an override.
+- **Area picker in editor** — the Global tab now shows an *Area mappings* section when at least one vacuum uses `native-area`. Each room key gets a dropdown populated from HA's area registry (`hass.areas`), falling back to a text field when no areas are available.
+- **Room accordion info row for `native-area`** — instead of an editable Area ID field, the room accordion now shows the effective area that will be used (resolved from global mapping) and a link to the Global tab.
+
+---
+
+## [0.9.1] - 2026-06-01
+
+### Fixed
+
+- **`native-area` uses `area_id` as `cleaning_area_id`** — the card now sends `room.area_id` (falling back to `room.key` if unset) when calling `vacuum.clean_area`. Previously it always sent `room.key`, which does not match the room identifiers used by the Roborock HA integration.
+- **Editor: `area_id` field in room accordion for `native-area`** — when a vacuum uses the `native-area` strategy, the Segment ID field is replaced by an *Area ID* text field. Enter the `cleaning_area_id` value as expected by the Roborock integration (e.g. `living_room`). A hint links to Developer Tools → Actions → `vacuum.clean_area` to look up available values.
+
+---
+
 ## [0.9.0] - 2026-06-01
 
 ### Added

@@ -494,10 +494,16 @@ export class RoborockVacuumCard extends LitElement {
     }
 
     if (vac.clean_action.type === "native-area") {
-      // Uses HA vacuum.clean_area -- room.key sent directly as cleaning_area_id
+      // Uses HA vacuum.clean_area.
+      // Priority: room.area_id → config.area_mappings[room.key] → room.key
+      const areaAction = vac.clean_action as NativeAreaCleanAction;
       await this.hass.callService(
         "vacuum", "clean_area",
-        { cleaning_area_id: selected.map((r) => r.key) },
+        {
+          cleaning_area_id: selected.map((r) =>
+            r.area_id ?? this._config.area_mappings?.[r.key] ?? r.key),
+          ...(areaAction.repeat && areaAction.repeat > 1 ? { times: areaAction.repeat } : {}),
+        },
         { entity_id: vac.entity },
       );
     } else {

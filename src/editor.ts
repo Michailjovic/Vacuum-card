@@ -339,6 +339,22 @@ export class RoborockVacuumCardEditor extends LitElement {
       </div>`;
   }
 
+
+  private _areaPicker(label: string, value: string | undefined, onChange: (v: string) => void) {
+    const areas = Object.values((this.hass as any)?.areas ?? {}) as Array<{area_id: string; name: string}>;
+    if (!areas.length) return this._textField(label, value, onChange, "e.g. living_room");
+    return html`
+      <div class="field field--row">
+        <label>${label}</label>
+        <select class="select-input"
+          @change=${(e: Event) => onChange((e.target as HTMLSelectElement).value)}>
+          <option value="">— not mapped —</option>
+          ${[...areas].sort((a, b) => a.name.localeCompare(b.name)).map(a =>
+            html`<option value=${a.area_id} ?selected=${a.area_id === value}>${a.name}</option>`)}
+        </select>
+      </div>`;
+  }
+
   // ── Tab: Vacuums ──────────────────────────────────────────────────────────
 
   private _renderVacuumsTab() {
@@ -507,7 +523,9 @@ export class RoborockVacuumCardEditor extends LitElement {
   private _renderNativeAreaAction(vacIdx: number, action: NativeAreaCleanAction) {
     return html`
       <div class="sub-section">
-        <p class="hint">Calls <code>vacuum.clean_area</code>. Room key is used as <code>cleaning_area_id</code> directly. Repeat not supported.</p>
+        <p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is passed as <code>times</code> parameter (Roborock integration ≥ May 2026).</p>
+        ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1,
+          v => this._setCleanAction(vacIdx, { repeat: v }))}
         <div class="sub-title">Suction level (optional)</div>
         ${(() => {
           const speeds: string[] = (this.hass.states[this._config.vacuums[vacIdx]?.entity]
@@ -592,7 +610,16 @@ export class RoborockVacuumCardEditor extends LitElement {
             ${this._textField("Display name", room.name,
               v => this._setRoom(vacIdx, roomIdx, { name: v }), "e.g. Bedroom")}
             ${this._config.vacuums[vacIdx]?.clean_action?.type === "native-area"
-              ? html`<p class="hint">Strategy: <strong>native-area</strong> — room key is sent as <code>cleaning_area_id</code> directly.</p>`
+              ? html`
+                <div class="field field--row">
+                  <label>Effective area</label>
+                  <strong style="font-size:13px">${
+                    this._config.area_mappings?.[room.key] ?? room.area_id ?? room.key
+                  }</strong>
+                </div>
+                <p class="hint map-hint" @click=${() => { this._tab = "global"; }}>
+                  Set in <strong>Global tab → Area mappings</strong> →
+                </p>`
               : html`
                 <div class="field field--row">
                   <label>Segment ID</label>
@@ -830,6 +857,26 @@ export class RoborockVacuumCardEditor extends LitElement {
             </button>
           ` : nothing}
         </div>
+
+        ${(() => {
+          const hasNativeArea = this._config.vacuums.some(v => v.clean_action?.type === "native-area");
+          if (!hasNativeArea) return nothing;
+          const allKeys = [...new Set(
+            this._config.vacuums.flatMap(v => (v.rooms ?? []).map(r => r.key)).filter(Boolean)
+          )].sort();
+          const mappings = this._config.area_mappings ?? {};
+          return html`
+            <div class="section-title" style="margin-top:4px">Area mappings</div>
+            <p class="hint">Maps room keys to HA areas for <strong>native-area</strong> strategy. Set once here — applies to all vacuums.</p>
+            ${allKeys.length === 0
+              ? html`<p class="hint">No rooms configured yet.</p>`
+              : allKeys.map(key => this._areaPicker(key, mappings[key], v => {
+                  const next = { ...mappings };
+                  if (v) next[key] = v; else delete next[key];
+                  this._setConfig({ area_mappings: Object.keys(next).length ? next : undefined });
+                }))}
+          `;
+        })()}
 
       </div>`;
   }

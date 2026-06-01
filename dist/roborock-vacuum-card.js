@@ -87,7 +87,7 @@ const t={ATTRIBUTE:1},e=t=>(...e)=>({_$litDirective$:t,values:e});let i$1 = clas
 
 const CARD_NAME = "roborock-vacuum-card";
 const EDITOR_NAME = "roborock-vacuum-card-editor";
-const CARD_VERSION = "0.9.0";
+const CARD_VERSION = "0.9.3";
 /** Hold duration in ms required to trigger START / PAUSE actions */
 const HOLD_DURATION_MS = 600;
 /**
@@ -604,8 +604,13 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
             await this._call("vacuum", "set_fan_speed", { entity_id: vac.entity, fan_speed: nativeAction.suction_level });
         }
         if (vac.clean_action.type === "native-area") {
-            // Uses HA vacuum.clean_area -- room.key sent directly as cleaning_area_id
-            await this.hass.callService("vacuum", "clean_area", { cleaning_area_id: selected.map((r) => r.key) }, { entity_id: vac.entity });
+            // Uses HA vacuum.clean_area.
+            // Priority: room.area_id → config.area_mappings[room.key] → room.key
+            const areaAction = vac.clean_action;
+            await this.hass.callService("vacuum", "clean_area", {
+                cleaning_area_id: selected.map((r) => r.area_id ?? this._config.area_mappings?.[r.key] ?? r.key),
+                ...(areaAction.repeat && areaAction.repeat > 1 ? { times: areaAction.repeat } : {}),
+            }, { entity_id: vac.entity });
         }
         else {
             // type === "native" -- uses roborock send_command with segment IDs
@@ -1608,6 +1613,20 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
         ></ha-icon-picker>
       </div>`;
     }
+    _areaPicker(label, value, onChange) {
+        const areas = Object.values(this.hass?.areas ?? {});
+        if (!areas.length)
+            return this._textField(label, value, onChange, "e.g. living_room");
+        return b `
+      <div class="field field--row">
+        <label>${label}</label>
+        <select class="select-input"
+          @change=${(e) => onChange(e.target.value)}>
+          <option value="">— not mapped —</option>
+          ${[...areas].sort((a, b) => a.name.localeCompare(b.name)).map(a => b `<option value=${a.area_id} ?selected=${a.area_id === value}>${a.name}</option>`)}
+        </select>
+      </div>`;
+    }
     // ── Tab: Vacuums ──────────────────────────────────────────────────────────
     _renderVacuumsTab() {
         return b `
@@ -1747,7 +1766,8 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
     _renderNativeAreaAction(vacIdx, action) {
         return b `
       <div class="sub-section">
-        <p class="hint">Calls <code>vacuum.clean_area</code>. Room key is used as <code>cleaning_area_id</code> directly. Repeat not supported.</p>
+        <p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is passed as <code>times</code> parameter (Roborock integration ≥ May 2026).</p>
+        ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1, v => this._setCleanAction(vacIdx, { repeat: v }))}
         <div class="sub-title">Suction level (optional)</div>
         ${(() => {
             const speeds = this.hass.states[this._config.vacuums[vacIdx]?.entity]
@@ -1821,7 +1841,14 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
             ${this._textField("Key (unique ID)", room.key, v => this._setRoom(vacIdx, roomIdx, { key: v }), "e.g. bedroom")}
             ${this._textField("Display name", room.name, v => this._setRoom(vacIdx, roomIdx, { name: v }), "e.g. Bedroom")}
             ${this._config.vacuums[vacIdx]?.clean_action?.type === "native-area"
-            ? b `<p class="hint">Strategy: <strong>native-area</strong> — room key is sent as <code>cleaning_area_id</code> directly.</p>`
+            ? b `
+                <div class="field field--row">
+                  <label>Effective area</label>
+                  <strong style="font-size:13px">${this._config.area_mappings?.[room.key] ?? room.area_id ?? room.key}</strong>
+                </div>
+                <p class="hint map-hint" @click=${() => { this._tab = "global"; }}>
+                  Set in <strong>Global tab → Area mappings</strong> →
+                </p>`
             : b `
                 <div class="field field--row">
                   <label>Segment ID</label>
@@ -2044,6 +2071,28 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
             </button>
           ` : A}
         </div>
+
+        ${(() => {
+            const hasNativeArea = this._config.vacuums.some(v => v.clean_action?.type === "native-area");
+            if (!hasNativeArea)
+                return A;
+            const allKeys = [...new Set(this._config.vacuums.flatMap(v => (v.rooms ?? []).map(r => r.key)).filter(Boolean))].sort();
+            const mappings = this._config.area_mappings ?? {};
+            return b `
+            <div class="section-title" style="margin-top:4px">Area mappings</div>
+            <p class="hint">Maps room keys to HA areas for <strong>native-area</strong> strategy. Set once here — applies to all vacuums.</p>
+            ${allKeys.length === 0
+                ? b `<p class="hint">No rooms configured yet.</p>`
+                : allKeys.map(key => this._areaPicker(key, mappings[key], v => {
+                    const next = { ...mappings };
+                    if (v)
+                        next[key] = v;
+                    else
+                        delete next[key];
+                    this._setConfig({ area_mappings: Object.keys(next).length ? next : undefined });
+                }))}
+          `;
+        })()}
 
       </div>`;
     }

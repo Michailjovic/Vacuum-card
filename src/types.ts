@@ -69,6 +69,7 @@ export interface NativeCleanAction {
  */
 export interface NativeAreaCleanAction {
   type: "native-area";
+  repeat?: number;         // passed as times: N in vacuum.clean_area data
   suction_level?: string;
   mop_mode_entity?: string;
   mop_mode?: string;
@@ -152,4 +153,10 @@ export interface RoborockVacuumCardConfig {
   room_border_selected?: number;  // border width when room is selected, default 4
   room_thresholds?: RoomThreshold[];
   room_icon_hidden?: boolean;     // hide all room overlay icons globally
+  /**
+   * Global room-key → HA area_id mapping for native-area strategy.
+   * Defined once here; all vacuums share it.
+   * Per-room area_id overrides this when set.
+   */
+  area_mappings?: Record<string, string>;
 }
