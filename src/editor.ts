@@ -541,7 +541,7 @@ export class RoborockVacuumCardEditor extends LitElement {
   private _renderNativeAreaAction(vacIdx: number, action: NativeAreaCleanAction) {
     return html`
       <div class="sub-section">
-        <p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is passed as <code>times</code> parameter (Roborock integration ≥ May 2026).</p>
+        <p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is implemented in software — the card restarts cleaning after each pass (robot docks between passes).</p>
         ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1,
           v => this._setCleanAction(vacIdx, { repeat: v }))}
         <div class="sub-title">Suction level (optional)</div>

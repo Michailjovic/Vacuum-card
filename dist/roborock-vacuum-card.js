@@ -87,7 +87,7 @@ const t={ATTRIBUTE:1},e=t=>(...e)=>({_$litDirective$:t,values:e});let i$1 = clas
 
 const CARD_NAME = "roborock-vacuum-card";
 const EDITOR_NAME = "roborock-vacuum-card-editor";
-const CARD_VERSION = "0.9.7";
+const CARD_VERSION = "0.9.8";
 /** Hold duration in ms required to trigger START / PAUSE actions */
 const HOLD_DURATION_MS = 600;
 /**
@@ -692,6 +692,20 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
         this._localRoomSel = next;
         this._saveRoomSel(vac.entity);
     }
+    _selectAll(vac) {
+        const next = new Map(this._localRoomSel);
+        for (const r of vac.rooms ?? [])
+            next.set(vac.entity + ":" + r.key, true);
+        this._localRoomSel = next;
+        this._saveRoomSel(vac.entity);
+    }
+    _deselectAll(vac) {
+        const next = new Map(this._localRoomSel);
+        for (const r of vac.rooms ?? [])
+            next.delete(vac.entity + ":" + r.key);
+        this._localRoomSel = next;
+        this._saveRoomSel(vac.entity);
+    }
     async _startClean(vac) {
         if (!vac.clean_action)
             return;
@@ -1147,6 +1161,13 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
               </div>
             ` : A}
             ${timeStr ? b `<small style="color:rgba(255,255,255,0.4)">${timeStr}</small>` : A}
+            ${(vac.rooms ?? []).length > 1 ? b `
+              <div class="sel-all-row">
+                <button class="sel-link" @click=${(e) => { e.stopPropagation(); this._selectAll(vac); }}>all</button>
+                <span style="color:rgba(255,255,255,0.2)">·</span>
+                <button class="sel-link" @click=${(e) => { e.stopPropagation(); this._deselectAll(vac); }}>none</button>
+              </div>
+            ` : A}
           </div>
         </button>
       </div>
@@ -1463,6 +1484,16 @@ RoborockVacuumCard.styles = i$5 `
     }
 
     .start-body small { font-size: 10px; }
+
+    .sel-all-row {
+      display: flex; align-items: center; gap: 4px; margin-top: 1px;
+    }
+    .sel-link {
+      background: none; border: none; cursor: pointer; padding: 0;
+      font-size: 10px; font-family: inherit;
+      color: rgba(255,255,255,0.3); transition: color .15s;
+    }
+    .sel-link:hover { color: rgba(255,255,255,0.7); }
 
     .room-icons {
       display: flex;
@@ -1962,7 +1993,7 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
     _renderNativeAreaAction(vacIdx, action) {
         return b `
       <div class="sub-section">
-        <p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is passed as <code>times</code> parameter (Roborock integration ≥ May 2026).</p>
+        <p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is implemented in software — the card restarts cleaning after each pass (robot docks between passes).</p>
         ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1, v => this._setCleanAction(vacIdx, { repeat: v }))}
         <div class="sub-title">Suction level (optional)</div>
         ${(() => {

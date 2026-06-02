@@ -593,6 +593,20 @@ export class RoborockVacuumCard extends LitElement {
     this._saveRoomSel(vac.entity);
   }
 
+  private _selectAll(vac: VacuumConfig): void {
+    const next = new Map(this._localRoomSel);
+    for (const r of vac.rooms ?? []) next.set(vac.entity + ":" + r.key, true);
+    this._localRoomSel = next;
+    this._saveRoomSel(vac.entity);
+  }
+
+  private _deselectAll(vac: VacuumConfig): void {
+    const next = new Map(this._localRoomSel);
+    for (const r of vac.rooms ?? []) next.delete(vac.entity + ":" + r.key);
+    this._localRoomSel = next;
+    this._saveRoomSel(vac.entity);
+  }
+
   private async _startClean(vac: VacuumConfig): Promise<void> {
     if (!vac.clean_action) return;
 
@@ -1070,6 +1084,13 @@ export class RoborockVacuumCard extends LitElement {
               </div>
             ` : nothing}
             ${timeStr ? html`<small style="color:rgba(255,255,255,0.4)">${timeStr}</small>` : nothing}
+            ${(vac.rooms ?? []).length > 1 ? html`
+              <div class="sel-all-row">
+                <button class="sel-link" @click=${(e: Event) => { e.stopPropagation(); this._selectAll(vac); }}>all</button>
+                <span style="color:rgba(255,255,255,0.2)">·</span>
+                <button class="sel-link" @click=${(e: Event) => { e.stopPropagation(); this._deselectAll(vac); }}>none</button>
+              </div>
+            ` : nothing}
           </div>
         </button>
       </div>
@@ -1392,6 +1413,16 @@ export class RoborockVacuumCard extends LitElement {
     }
 
     .start-body small { font-size: 10px; }
+
+    .sel-all-row {
+      display: flex; align-items: center; gap: 4px; margin-top: 1px;
+    }
+    .sel-link {
+      background: none; border: none; cursor: pointer; padding: 0;
+      font-size: 10px; font-family: inherit;
+      color: rgba(255,255,255,0.3); transition: color .15s;
+    }
+    .sel-link:hover { color: rgba(255,255,255,0.7); }
 
     .room-icons {
       display: flex;

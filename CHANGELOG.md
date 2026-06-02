@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8] - 2026-06-02
+
+### Added
+
+- **Select all / Deselect all** — two small inline buttons (*all* · *none*) appear inside the START button when a vacuum has more than one room configured. Clicking either sets or clears the full room selection for that vacuum and persists it to `localStorage`.
+
+### Fixed
+
+- **`native-area` editor hint** — corrected the description of repeat behaviour: the card uses software repeat (restarts after each pass), not the `times` parameter which the Roborock integration does not accept.
+
+---
+
 ## [0.9.7] - 2026-06-02
 
 ### Added
