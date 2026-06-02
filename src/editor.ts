@@ -11,11 +11,14 @@ import type {
   CleanAction,
   NativeCleanAction,
   NativeAreaCleanAction,
+  NativeAutoCleanAction,
   ScriptCleanAction,
   VacuumColor,
   GlobalAction,
   GlobalActionCall,
   RoomThreshold,
+  NotifyConfig,
+  NotifyTemplates,
 } from "./types";
 import { EDITOR_NAME, COLOR_HEX } from "./const";
 
@@ -147,6 +150,17 @@ export class RoborockVacuumCardEditor extends LitElement {
   private _setGlobalAction(idx: number, updates: Partial<GlobalActionCall>): void {
     const existing = this._config.global_actions?.[idx]?.action ?? { type: "script", entity_id: "" };
     this._setGlobal(idx, { action: { ...existing, ...updates } as GlobalActionCall });
+  }
+
+  private _setNotify(updates: Partial<NotifyConfig>): void {
+    const existing = this._config.notify ?? { category: "Cleaning" };
+    const next = { ...existing, ...updates };
+    this._setConfig({ notify: next });
+  }
+
+  private _setNotifyTemplate(event: "on_start" | "on_finish", updates: Partial<NotifyTemplates>): void {
+    const existing = this._config.notify?.[event] ?? {};
+    this._setNotify({ [event]: { ...existing, ...updates } });
   }
 
   // ── List mutations ────────────────────────────────────────────────────────
@@ -476,19 +490,23 @@ export class RoborockVacuumCardEditor extends LitElement {
   private _renderCleanActionEditor(vacIdx: number, vac: VacuumConfig) {
     const action = vac.clean_action ?? { type: "native" as const };
     return html`
-      ${this._selectField<"native" | "native-area" | "script">("Strategy", action.type,
-        [{ value: "native",      label: "Native Roborock (vacuum.send_command)" },
+      ${this._selectField<"native" | "native-area" | "native-auto" | "script">("Strategy", action.type,
+        [{ value: "native",      label: "Native (vacuum.send_command + segment IDs)" },
+         { value: "native-auto", label: "Native auto (auto-resolve IDs from roborock.get_maps)" },
          { value: "native-area", label: "Native area (vacuum.clean_area)" },
          { value: "script",      label: "Custom script" }],
         v => this._setVacuum(vacIdx, { clean_action:
           v === "native"      ? { type: "native" } :
+          v === "native-auto" ? { type: "native-auto" } :
           v === "native-area" ? { type: "native-area" } :
                                 { type: "script", entity_id: "" } }))}
       ${action.type === "native"
         ? this._renderNativeAction(vacIdx, action as NativeCleanAction)
-        : action.type === "native-area"
-          ? this._renderNativeAreaAction(vacIdx, action as NativeAreaCleanAction)
-          : this._renderScriptAction(vacIdx, action as ScriptCleanAction)}`;
+        : action.type === "native-auto"
+          ? this._renderNativeAutoAction(vacIdx, action as NativeAutoCleanAction)
+          : action.type === "native-area"
+            ? this._renderNativeAreaAction(vacIdx, action as NativeAreaCleanAction)
+            : this._renderScriptAction(vacIdx, action as ScriptCleanAction)}`;
   }
 
   private _renderNativeAction(vacIdx: number, action: NativeCleanAction) {
@@ -524,6 +542,35 @@ export class RoborockVacuumCardEditor extends LitElement {
     return html`
       <div class="sub-section">
         <p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is passed as <code>times</code> parameter (Roborock integration ≥ May 2026).</p>
+        ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1,
+          v => this._setCleanAction(vacIdx, { repeat: v }))}
+        <div class="sub-title">Suction level (optional)</div>
+        ${(() => {
+          const speeds: string[] = (this.hass.states[this._config.vacuums[vacIdx]?.entity]
+            ?.attributes["fan_speed_list"] as string[]) ?? [];
+          return speeds.length
+            ? this._optionSelectFromList("Suction option", speeds, action.suction_level,
+                v => this._setCleanAction(vacIdx, { suction_level: v || undefined }))
+            : this._textField("Suction option", action.suction_level,
+                v => this._setCleanAction(vacIdx, { suction_level: v || undefined }), "e.g. balanced");
+        })()}
+        <div class="sub-title">Mop mode (optional)</div>
+        ${this._entityPicker("Mop mode entity", action.mop_mode_entity, ["select"],
+          v => this._setCleanAction(vacIdx, { mop_mode_entity: v || undefined }))}
+        ${action.mop_mode_entity ? this._optionSelect("Mop mode option", action.mop_mode_entity, action.mop_mode,
+          v => this._setCleanAction(vacIdx, { mop_mode: v || undefined })) : nothing}
+        <div class="sub-title">Mop intensity (optional)</div>
+        ${this._entityPicker("Mop intensity entity", action.mop_intensity_entity, ["select"],
+          v => this._setCleanAction(vacIdx, { mop_intensity_entity: v || undefined }))}
+        ${action.mop_intensity_entity ? this._optionSelect("Mop intensity option", action.mop_intensity_entity, action.mop_intensity,
+          v => this._setCleanAction(vacIdx, { mop_intensity: v || undefined })) : nothing}
+      </div>`;
+  }
+
+  private _renderNativeAutoAction(vacIdx: number, action: NativeAutoCleanAction) {
+    return html`
+      <div class="sub-section">
+        <p class="hint">Calls <code>roborock.get_maps</code> at clean time, matches rooms via Area mappings (Global tab), then sends <code>vacuum.send_command</code> with <code>app_segment_clean</code>. Supports native repeat. Falls back to <code>segment_id</code> if auto-resolve fails.</p>
         ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1,
           v => this._setCleanAction(vacIdx, { repeat: v }))}
         <div class="sub-title">Suction level (optional)</div>
@@ -609,7 +656,8 @@ export class RoborockVacuumCardEditor extends LitElement {
               v => this._setRoom(vacIdx, roomIdx, { key: v }), "e.g. bedroom")}
             ${this._textField("Display name", room.name,
               v => this._setRoom(vacIdx, roomIdx, { name: v }), "e.g. Bedroom")}
-            ${this._config.vacuums[vacIdx]?.clean_action?.type === "native-area"
+            ${(this._config.vacuums[vacIdx]?.clean_action?.type === "native-area" ||
+               this._config.vacuums[vacIdx]?.clean_action?.type === "native-auto")
               ? html`
                 <div class="field field--row">
                   <label>Effective area</label>
@@ -857,6 +905,59 @@ export class RoborockVacuumCardEditor extends LitElement {
             </button>
           ` : nothing}
         </div>
+
+        ${(() => {
+          const notify = this._config.notify;
+          const notifyOpen = !!notify;
+          const START_TOKENS = '{{ vacuum_label }}, {{ room_labels }}, {{ room_keys }}, {{ estimated_mins }}, {{ clean_type }}';
+          const FINISH_TOKENS = START_TOKENS + ', {{ actual_mins }}, {{ success }}';
+          return html`
+            <div class="section-title" style="margin-top:4px">Notifications (Ticker)</div>
+            <div class="field field--row">
+              <label>Enable</label>
+              <label class="toggle-wrap">
+                <input type="checkbox" class="toggle-input"
+                  .checked=${!!notify}
+                  @change=${(e: Event) => {
+                    if ((e.target as HTMLInputElement).checked) {
+                      this._setConfig({ notify: { category: 'Cleaning' } });
+                    } else {
+                      this._setConfig({ notify: undefined });
+                    }
+                  }} />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+            ${notify ? html`
+              ${this._textField('Category', notify.category,
+                v => this._setNotify({ category: v }), 'e.g. Cleaning')}
+              <div class="field field--row">
+                <label>Color (dry)</label>
+                <input type="color" class="threshold-color" .value=${notify.color_dry ?? '#4CAF50'}
+                  @input=${(e: Event) => this._setNotify({ color_dry: (e.target as HTMLInputElement).value })} />
+              </div>
+              <div class="field field--row">
+                <label>Color (wet)</label>
+                <input type="color" class="threshold-color" .value=${notify.color_wet ?? '#2196F3'}
+                  @input=${(e: Event) => this._setNotify({ color_wet: (e.target as HTMLInputElement).value })} />
+              </div>
+              ${this._textField('Tag prefix', notify.tag_prefix,
+                v => this._setNotify({ tag_prefix: v || undefined }), 'e.g. roborock')}
+              <div class="sub-title">On clean start</div>
+              ${this._textField('Title', notify.on_start?.title,
+                v => this._setNotifyTemplate('on_start', { title: v || undefined }), '🧹 {{ vacuum_label }}')}
+              ${this._textField('Message', notify.on_start?.message,
+                v => this._setNotifyTemplate('on_start', { message: v || undefined }), '{{ room_labels }} · ~{{ estimated_mins }} min')}
+              <p class="hint">Tokens: ${START_TOKENS}</p>
+              <div class="sub-title">On clean finish</div>
+              ${this._textField('Title', notify.on_finish?.title,
+                v => this._setNotifyTemplate('on_finish', { title: v || undefined }), '✅ {{ vacuum_label }} hotovo')}
+              ${this._textField('Message', notify.on_finish?.message,
+                v => this._setNotifyTemplate('on_finish', { message: v || undefined }), '{{ room_labels }} · {{ actual_mins }} min')}
+              <p class="hint">Tokens: ${FINISH_TOKENS}</p>
+            ` : nothing}
+          `;
+        })()}
 
         ${(() => {
           const hasNativeArea = this._config.vacuums.some(v => v.clean_action?.type === "native-area");

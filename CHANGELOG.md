@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-06-02
+
+### Added
+
+- **`native-auto` clean strategy** — new `type: "native-auto"` option. At clean time the card calls `roborock.get_maps` with `returnResponse: true`, slugifies the returned room names (e.g. `"Living Room"` → `"living_room"`), matches them against the room's `area_id` / global `area_mappings`, and calls `vacuum.send_command` with `app_segment_clean`. This means no manual `segment_id` configuration is needed, while keeping full native `repeat` support (1–3×). Falls back to the room's `segment_id` if auto-resolution fails for any room.
+
+---
+
+## [0.9.6] - 2026-06-02
+
+### Fixed
+
+- **`native-area` start error** — removed `times` parameter from `vacuum.clean_area` call. The Roborock integration rejects unknown keys, causing the action to fail immediately.
+
+### Changed
+
+- **Software repeat for `native-area`** — since `vacuum.clean_area` has no native repeat parameter, the card now implements repeat in software: after each successful pass the card detects the robot docking and automatically issues the next `vacuum.clean_area` call. Timestamps and notifications fire only after the final pass. The `{{ actual_mins }}` token in the `on_finish` notification template reflects the total time across all passes.
+
+---
+
+## [0.9.5] - 2026-06-02
+
+### Added
+
+- **Ticker notification support** — new top-level `notify` config block. When configured, the card calls `ticker.notify` on `cleaning_started` and `cleaning_finished`. Both events support fully customisable `title` and `message` templates with token substitution. Available tokens: `{{ vacuum_label }}`, `{{ vacuum_entity }}`, `{{ room_labels }}`, `{{ room_keys }}`, `{{ estimated_mins }}`, `{{ clean_type }}`; `on_finish` additionally provides `{{ actual_mins }}` and `{{ success }}`.
+- **Notification editor in Global tab** — enable/disable toggle, category, per-type colour pickers (dry / wet), tag prefix, and title/message template fields for both events, with token reference hints.
+
+---
+
 ## [0.9.4] - 2026-06-02
 
 ### Added

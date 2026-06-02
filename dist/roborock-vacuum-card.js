@@ -87,7 +87,7 @@ const t={ATTRIBUTE:1},e=t=>(...e)=>({_$litDirective$:t,values:e});let i$1 = clas
 
 const CARD_NAME = "roborock-vacuum-card";
 const EDITOR_NAME = "roborock-vacuum-card-editor";
-const CARD_VERSION = "0.9.4";
+const CARD_VERSION = "0.9.7";
 /** Hold duration in ms required to trigger START / PAUSE actions */
 const HOLD_DURATION_MS = 600;
 /**
@@ -491,7 +491,9 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
         }));
     }
     _deriveCleanType(vac) {
-        if (vac.clean_action?.type === "native" || vac.clean_action?.type === "native-area") {
+        if (vac.clean_action?.type === "native" ||
+            vac.clean_action?.type === "native-area" ||
+            vac.clean_action?.type === "native-auto") {
             const na = vac.clean_action;
             if (na.mop_mode_entity || na.mop_intensity_entity)
                 return "wet";
@@ -527,8 +529,23 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
     }
     async _evalCleaningComplete(vacEntity, flight) {
         const actualMs = Date.now() - flight.startTime;
-        const actualMins = Math.round(actualMs / 60000);
         const success = flight.expectedMs === 0 || actualMs >= flight.expectedMs * 0.5;
+        // Software repeat — restart if more passes remaining
+        if (success && flight.repeatRemaining > 0 && flight.areaIds) {
+            try {
+                await this.hass.callService("vacuum", "clean_area", { cleaning_area_id: flight.areaIds }, { entity_id: vacEntity });
+            }
+            catch (err) {
+                console.error("[roborock-vacuum-card] repeat restart failed:", err);
+                return;
+            }
+            this._inFlight.set(vacEntity, {
+                ...flight,
+                startTime: Date.now(),
+                repeatRemaining: flight.repeatRemaining - 1,
+            });
+            return; // timestamps + notification fire only after last pass
+        }
         // Auto-calibration: handle last room (no room_entered transition at session end)
         const lastRoom = this._prevRoomStates.get(vacEntity) ?? "";
         if (lastRoom) {
@@ -560,6 +577,7 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
             this._localRoomSel = nextSel;
             this._saveRoomSel(vacEntity);
         }
+        const totalActualMins = Math.round((Date.now() - flight.originalStartTime) / 60000);
         this._fireHAEvent({
             action: "cleaning_finished",
             vacuum_entity: vacEntity,
@@ -568,8 +586,18 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
             rooms: flight.rooms.map(r => r.key),
             room_labels: flight.rooms.map(r => r.name).join(", "),
             estimated_mins: Math.round(flight.expectedMs / 60000),
-            actual_mins: actualMins,
+            actual_mins: totalActualMins,
             success,
+        });
+        await this._sendNotify(this._config.notify?.on_finish, {
+            vacuum_label: flight.vacLabel,
+            vacuum_entity: vacEntity,
+            room_labels: flight.rooms.map(r => r.name).join(", "),
+            room_keys: flight.rooms.map(r => r.key).join(", "),
+            estimated_mins: Math.round(flight.expectedMs / 60000),
+            actual_mins: totalActualMins,
+            clean_type: flight.cleanType,
+            success: String(success),
         });
     }
     // ── localStorage persistence ──────────────────────────────────────────────
@@ -624,6 +652,30 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
         catch { /* ignore */ }
         return map;
     }
+    // ── Notifications ──────────────────────────────────────────────────────
+    _resolveTemplate(tmpl, tokens) {
+        return tmpl.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k) => String(tokens[k] ?? ""));
+    }
+    async _sendNotify(template, tokens) {
+        const cfg = this._config.notify;
+        if (!cfg || !template)
+            return;
+        const isWet = tokens["clean_type"] === "wet";
+        const color = isWet ? (cfg.color_wet ?? "#2196F3") : (cfg.color_dry ?? "#4CAF50");
+        const icon = isWet ? "mdi:mop" : "mdi:robot-vacuum";
+        const tag = (cfg.tag_prefix ?? "roborock") + "-" + String(tokens["vacuum_entity"] ?? "");
+        try {
+            await this.hass.callService("ticker", "notify", {
+                category: cfg.category,
+                title: template.title ? this._resolveTemplate(template.title, tokens) : undefined,
+                message: template.message ? this._resolveTemplate(template.message, tokens) : undefined,
+                data: { data: { notification_icon: icon, color, priority: "high", tag } },
+            });
+        }
+        catch (err) {
+            console.error("[roborock-vacuum-card] notify failed:", err);
+        }
+    }
     _pause(vac) {
         this._call("vacuum", "pause", { entity_id: vac.entity });
     }
@@ -672,16 +724,59 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
             await this._call("vacuum", "set_fan_speed", { entity_id: vac.entity, fan_speed: nativeAction.suction_level });
         }
         if (vac.clean_action.type === "native-area") {
-            // Uses HA vacuum.clean_area.
-            // Priority: room.area_id → config.area_mappings[room.key] → room.key
-            const areaAction = vac.clean_action;
-            await this.hass.callService("vacuum", "clean_area", {
-                cleaning_area_id: selected.map((r) => r.area_id ?? this._config.area_mappings?.[r.key] ?? r.key),
-                ...(areaAction.repeat && areaAction.repeat > 1 ? { times: areaAction.repeat } : {}),
-            }, { entity_id: vac.entity });
+            // Uses HA vacuum.clean_area — area_id resolved via area_mappings
+            await this.hass.callService("vacuum", "clean_area", { cleaning_area_id: selected.map((r) => r.area_id ?? this._config.area_mappings?.[r.key] ?? r.key) }, { entity_id: vac.entity });
+        }
+        else if (vac.clean_action.type === "native-auto") {
+            // Dynamically resolve segment IDs from roborock.get_maps, then send_command
+            const autoAction = vac.clean_action;
+            let autoSegments = [];
+            try {
+                const mapResult = await this.hass.callService("roborock", "get_maps", {}, { entity_id: vac.entity }, false, true);
+                const maps = mapResult?.response?.[vac.entity]?.maps;
+                const roomsMap = {};
+                if (maps) {
+                    for (const m of maps) {
+                        if (m.rooms && Object.keys(m.rooms).length > 0) {
+                            Object.assign(roomsMap, m.rooms);
+                            break;
+                        }
+                    }
+                }
+                const slugify = (s) => s.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "");
+                const slugMap = {};
+                for (const [sid, name] of Object.entries(roomsMap))
+                    slugMap[slugify(name)] = Number(sid);
+                for (const room of selected) {
+                    const areaId = room.area_id ?? this._config.area_mappings?.[room.key] ?? room.key;
+                    const sid = slugMap[areaId];
+                    if (sid !== undefined) {
+                        autoSegments.push(sid);
+                    }
+                    else if (room.segment_id !== undefined) {
+                        autoSegments.push(room.segment_id); // fallback to manual segment_id
+                    }
+                    else {
+                        console.warn("[roborock-vacuum-card] no segment for", room.key, "(area:", areaId + ")");
+                    }
+                }
+            }
+            catch (err) {
+                console.error("[roborock-vacuum-card] get_maps failed:", err);
+                autoSegments = selected.map(r => r.segment_id).filter((id) => id !== undefined);
+            }
+            if (autoSegments.length === 0) {
+                console.error("[roborock-vacuum-card] native-auto: no segments resolved, aborting");
+                return;
+            }
+            await this._call("vacuum", "send_command", {
+                entity_id: vac.entity,
+                command: "app_segment_clean",
+                params: [{ segments: autoSegments, repeat: autoAction.repeat ?? 1 }],
+            });
         }
         else {
-            // type === "native" -- uses roborock send_command with segment IDs
+            // type === "native" — segment IDs from room config
             const action = vac.clean_action;
             const segments = selected.map((r) => r.segment_id).filter((id) => id !== undefined);
             await this._call("vacuum", "send_command", {
@@ -693,12 +788,24 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
         // Register in-flight + fire event (shared for both native variants)
         const totalMins = this._totalCleanMins(vac);
         const vacLabel = vac.name ?? vac.entity.split(".")[1] ?? vac.entity;
+        const isNativeArea = vac.clean_action.type === "native-area";
+        const nativeAreaAct = isNativeArea ? vac.clean_action : null;
+        const areaIds = isNativeArea
+            ? selected.map(r => r.area_id ?? this._config.area_mappings?.[r.key] ?? r.key)
+            : undefined;
+        const repeatRemaining = (nativeAreaAct?.repeat ?? 1) > 1
+            ? (nativeAreaAct.repeat) - 1
+            : 0;
+        const now = Date.now();
         this._inFlight.set(vac.entity, {
             rooms: selected.map(r => ({ key: r.key, name: r.name, last_clean_entity: r.last_clean_entity, clean_time_entity: r.clean_time_entity })),
             expectedMs: totalMins * 60000,
-            startTime: Date.now(),
+            startTime: now,
+            originalStartTime: now,
             vacLabel,
             cleanType: this._deriveCleanType(vac),
+            repeatRemaining,
+            areaIds,
         });
         this._fireHAEvent({
             action: "cleaning_started",
@@ -708,6 +815,14 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
             rooms: selected.map(r => r.key),
             room_labels: selected.map(r => r.name).join(", "),
             estimated_mins: Math.round(totalMins),
+        });
+        await this._sendNotify(this._config.notify?.on_start, {
+            vacuum_label: vacLabel,
+            vacuum_entity: vac.entity,
+            room_labels: selected.map(r => r.name).join(", "),
+            room_keys: selected.map(r => r.key).join(", "),
+            estimated_mins: Math.round(totalMins),
+            clean_type: this._deriveCleanType(vac),
         });
     }
     // ── Render: badges ──────────────────────────────────────────────────────
@@ -1492,6 +1607,15 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
         const existing = this._config.global_actions?.[idx]?.action ?? { type: "script", entity_id: "" };
         this._setGlobal(idx, { action: { ...existing, ...updates } });
     }
+    _setNotify(updates) {
+        const existing = this._config.notify ?? { category: "Cleaning" };
+        const next = { ...existing, ...updates };
+        this._setConfig({ notify: next });
+    }
+    _setNotifyTemplate(event, updates) {
+        const existing = this._config.notify?.[event] ?? {};
+        this._setNotify({ [event]: { ...existing, ...updates } });
+    }
     // ── List mutations ────────────────────────────────────────────────────────
     _moveVacuum(idx, dir) {
         const target = idx + dir;
@@ -1800,16 +1924,20 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
     _renderCleanActionEditor(vacIdx, vac) {
         const action = vac.clean_action ?? { type: "native" };
         return b `
-      ${this._selectField("Strategy", action.type, [{ value: "native", label: "Native Roborock (vacuum.send_command)" },
+      ${this._selectField("Strategy", action.type, [{ value: "native", label: "Native (vacuum.send_command + segment IDs)" },
+            { value: "native-auto", label: "Native auto (auto-resolve IDs from roborock.get_maps)" },
             { value: "native-area", label: "Native area (vacuum.clean_area)" },
             { value: "script", label: "Custom script" }], v => this._setVacuum(vacIdx, { clean_action: v === "native" ? { type: "native" } :
-                v === "native-area" ? { type: "native-area" } :
-                    { type: "script", entity_id: "" } }))}
+                v === "native-auto" ? { type: "native-auto" } :
+                    v === "native-area" ? { type: "native-area" } :
+                        { type: "script", entity_id: "" } }))}
       ${action.type === "native"
             ? this._renderNativeAction(vacIdx, action)
-            : action.type === "native-area"
-                ? this._renderNativeAreaAction(vacIdx, action)
-                : this._renderScriptAction(vacIdx, action)}`;
+            : action.type === "native-auto"
+                ? this._renderNativeAutoAction(vacIdx, action)
+                : action.type === "native-area"
+                    ? this._renderNativeAreaAction(vacIdx, action)
+                    : this._renderScriptAction(vacIdx, action)}`;
     }
     _renderNativeAction(vacIdx, action) {
         return b `
@@ -1835,6 +1963,27 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
         return b `
       <div class="sub-section">
         <p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is passed as <code>times</code> parameter (Roborock integration ≥ May 2026).</p>
+        ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1, v => this._setCleanAction(vacIdx, { repeat: v }))}
+        <div class="sub-title">Suction level (optional)</div>
+        ${(() => {
+            const speeds = this.hass.states[this._config.vacuums[vacIdx]?.entity]
+                ?.attributes["fan_speed_list"] ?? [];
+            return speeds.length
+                ? this._optionSelectFromList("Suction option", speeds, action.suction_level, v => this._setCleanAction(vacIdx, { suction_level: v || undefined }))
+                : this._textField("Suction option", action.suction_level, v => this._setCleanAction(vacIdx, { suction_level: v || undefined }), "e.g. balanced");
+        })()}
+        <div class="sub-title">Mop mode (optional)</div>
+        ${this._entityPicker("Mop mode entity", action.mop_mode_entity, ["select"], v => this._setCleanAction(vacIdx, { mop_mode_entity: v || undefined }))}
+        ${action.mop_mode_entity ? this._optionSelect("Mop mode option", action.mop_mode_entity, action.mop_mode, v => this._setCleanAction(vacIdx, { mop_mode: v || undefined })) : A}
+        <div class="sub-title">Mop intensity (optional)</div>
+        ${this._entityPicker("Mop intensity entity", action.mop_intensity_entity, ["select"], v => this._setCleanAction(vacIdx, { mop_intensity_entity: v || undefined }))}
+        ${action.mop_intensity_entity ? this._optionSelect("Mop intensity option", action.mop_intensity_entity, action.mop_intensity, v => this._setCleanAction(vacIdx, { mop_intensity: v || undefined })) : A}
+      </div>`;
+    }
+    _renderNativeAutoAction(vacIdx, action) {
+        return b `
+      <div class="sub-section">
+        <p class="hint">Calls <code>roborock.get_maps</code> at clean time, matches rooms via Area mappings (Global tab), then sends <code>vacuum.send_command</code> with <code>app_segment_clean</code>. Supports native repeat. Falls back to <code>segment_id</code> if auto-resolve fails.</p>
         ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1, v => this._setCleanAction(vacIdx, { repeat: v }))}
         <div class="sub-title">Suction level (optional)</div>
         ${(() => {
@@ -1908,7 +2057,8 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
           <div class="room-acc-body">
             ${this._textField("Key (unique ID)", room.key, v => this._setRoom(vacIdx, roomIdx, { key: v }), "e.g. bedroom")}
             ${this._textField("Display name", room.name, v => this._setRoom(vacIdx, roomIdx, { name: v }), "e.g. Bedroom")}
-            ${this._config.vacuums[vacIdx]?.clean_action?.type === "native-area"
+            ${(this._config.vacuums[vacIdx]?.clean_action?.type === "native-area" ||
+            this._config.vacuums[vacIdx]?.clean_action?.type === "native-auto")
             ? b `
                 <div class="field field--row">
                   <label>Effective area</label>
@@ -2139,6 +2289,53 @@ let RoborockVacuumCardEditor = class RoborockVacuumCardEditor extends i$2 {
             </button>
           ` : A}
         </div>
+
+        ${(() => {
+            const notify = this._config.notify;
+            const START_TOKENS = '{{ vacuum_label }}, {{ room_labels }}, {{ room_keys }}, {{ estimated_mins }}, {{ clean_type }}';
+            const FINISH_TOKENS = START_TOKENS + ', {{ actual_mins }}, {{ success }}';
+            return b `
+            <div class="section-title" style="margin-top:4px">Notifications (Ticker)</div>
+            <div class="field field--row">
+              <label>Enable</label>
+              <label class="toggle-wrap">
+                <input type="checkbox" class="toggle-input"
+                  .checked=${!!notify}
+                  @change=${(e) => {
+                if (e.target.checked) {
+                    this._setConfig({ notify: { category: 'Cleaning' } });
+                }
+                else {
+                    this._setConfig({ notify: undefined });
+                }
+            }} />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+            ${notify ? b `
+              ${this._textField('Category', notify.category, v => this._setNotify({ category: v }), 'e.g. Cleaning')}
+              <div class="field field--row">
+                <label>Color (dry)</label>
+                <input type="color" class="threshold-color" .value=${notify.color_dry ?? '#4CAF50'}
+                  @input=${(e) => this._setNotify({ color_dry: e.target.value })} />
+              </div>
+              <div class="field field--row">
+                <label>Color (wet)</label>
+                <input type="color" class="threshold-color" .value=${notify.color_wet ?? '#2196F3'}
+                  @input=${(e) => this._setNotify({ color_wet: e.target.value })} />
+              </div>
+              ${this._textField('Tag prefix', notify.tag_prefix, v => this._setNotify({ tag_prefix: v || undefined }), 'e.g. roborock')}
+              <div class="sub-title">On clean start</div>
+              ${this._textField('Title', notify.on_start?.title, v => this._setNotifyTemplate('on_start', { title: v || undefined }), '🧹 {{ vacuum_label }}')}
+              ${this._textField('Message', notify.on_start?.message, v => this._setNotifyTemplate('on_start', { message: v || undefined }), '{{ room_labels }} · ~{{ estimated_mins }} min')}
+              <p class="hint">Tokens: ${START_TOKENS}</p>
+              <div class="sub-title">On clean finish</div>
+              ${this._textField('Title', notify.on_finish?.title, v => this._setNotifyTemplate('on_finish', { title: v || undefined }), '✅ {{ vacuum_label }} hotovo')}
+              ${this._textField('Message', notify.on_finish?.message, v => this._setNotifyTemplate('on_finish', { message: v || undefined }), '{{ room_labels }} · {{ actual_mins }} min')}
+              <p class="hint">Tokens: ${FINISH_TOKENS}</p>
+            ` : A}
+          `;
+        })()}
 
         ${(() => {
             const hasNativeArea = this._config.vacuums.some(v => v.clean_action?.type === "native-area");

@@ -77,13 +77,28 @@ export interface NativeAreaCleanAction {
   mop_intensity?: string;
 }
 
+/**
+ * Uses roborock.get_maps to dynamically resolve segment IDs, then calls
+ * vacuum.send_command with app_segment_clean + repeat (same as native).
+ * No segment_id needed per room -- matching is done via area_mappings.
+ */
+export interface NativeAutoCleanAction {
+  type: "native-auto";
+  repeat?: number;
+  suction_level?: string;
+  mop_mode_entity?: string;
+  mop_mode?: string;
+  mop_intensity_entity?: string;
+  mop_intensity?: string;
+}
+
 export interface ScriptCleanAction {
   type: "script";
   entity_id: string;
   variables?: Record<string, string>;
 }
 
-export type CleanAction = NativeCleanAction | NativeAreaCleanAction | ScriptCleanAction;
+export type CleanAction = NativeCleanAction | NativeAreaCleanAction | NativeAutoCleanAction | ScriptCleanAction;
 
 // ── Global action ─────────────────────────────────────────────────────────
 
@@ -143,6 +158,26 @@ export interface VacuumConfig {
   error_entity?: string;
 }
 
+export interface NotifyTemplates {
+  title?: string;
+  message?: string;
+}
+
+export interface NotifyConfig {
+  /** Ticker category name */
+  category: string;
+  /** Accent colour for dry cleaning notifications */
+  color_dry?: string;
+  /** Accent colour for wet cleaning notifications */
+  color_wet?: string;
+  /** Tag prefix for notification grouping/replacing (default: "roborock") */
+  tag_prefix?: string;
+  /** Templates fired on cleaning_started */
+  on_start?: NotifyTemplates;
+  /** Templates fired on cleaning_finished */
+  on_finish?: NotifyTemplates;
+}
+
 export interface RoborockVacuumCardConfig {
   type: string;
   vacuums: VacuumConfig[];
@@ -159,4 +194,6 @@ export interface RoborockVacuumCardConfig {
    * Per-room area_id overrides this when set.
    */
   area_mappings?: Record<string, string>;
+  /** Ticker notification config */
+  notify?: NotifyConfig;
 }
