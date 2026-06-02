@@ -1,6 +1,6 @@
 {
   "name": "roborock-vacuum-card",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Feature-rich Lovelace card for Roborock vacuums",
   "keywords": [
     "home-assistant",

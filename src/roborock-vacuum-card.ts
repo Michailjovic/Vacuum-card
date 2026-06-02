@@ -62,6 +62,7 @@ export class RoborockVacuumCard extends LitElement {
   private _roomEnterTimes = new Map<string, number>();
 
   private _holdTimer: ReturnType<typeof setTimeout> | null = null;
+  private _initialized = false;
 
   // ── Lovelace card API ───────────────────────────────────────────────────
 
@@ -89,9 +90,15 @@ export class RoborockVacuumCard extends LitElement {
       throw new Error("[roborock-vacuum-card] 'vacuums' must be a non-empty array");
     }
     this._config = config;
-    const valid = new Set<number>();
-    for (const i of this._shownSet) { if (i < config.vacuums.length) valid.add(i); }
-    this._shownSet = valid.size > 0 ? valid : new Set([0]);
+    if (!this._initialized) {
+      this._initialized = true;
+      this._shownSet = this._loadShown();
+      this._localRoomSel = this._loadRoomSel();
+    } else {
+      const valid = new Set<number>();
+      for (const i of this._shownSet) { if (i < config.vacuums.length) valid.add(i); }
+      this._shownSet = valid.size > 0 ? valid : new Set(config.vacuums.map((_, i) => i));
+    }
   }
 
   getCardSize(): number {
@@ -338,6 +345,7 @@ export class RoborockVacuumCard extends LitElement {
     if (next.has(index)) { if (next.size > 1) next.delete(index); }
     else { next.add(index); }
     this._shownSet = next;
+    this._saveShown();
   }
 
   // ── Service calls ───────────────────────────────────────────────────────
@@ -426,6 +434,11 @@ export class RoborockVacuumCard extends LitElement {
           });
         }
       }
+      // Clear room selection for this vacuum after successful clean
+      const nextSel = new Map(this._localRoomSel);
+      for (const room of flight.rooms) nextSel.delete(vacEntity + ":" + room.key);
+      this._localRoomSel = nextSel;
+      this._saveRoomSel(vacEntity);
     }
 
     this._fireHAEvent({
@@ -439,6 +452,56 @@ export class RoborockVacuumCard extends LitElement {
       actual_mins: actualMins,
       success,
     });
+  }
+
+  // ── localStorage persistence ──────────────────────────────────────────────
+
+  private _saveShown(): void {
+    try {
+      const ids = [...this._shownSet].map(i => this._config.vacuums[i]?.entity).filter(Boolean);
+      localStorage.setItem("roborock-card:shown", JSON.stringify(ids));
+    } catch { /* storage unavailable */ }
+  }
+
+  private _loadShown(): Set<number> {
+    try {
+      const raw = localStorage.getItem("roborock-card:shown");
+      if (raw) {
+        const ids: string[] = JSON.parse(raw);
+        const indices = ids
+          .map(id => this._config.vacuums.findIndex(v => v.entity === id))
+          .filter(i => i >= 0);
+        if (indices.length > 0) return new Set(indices);
+      }
+    } catch { /* ignore */ }
+    return new Set(this._config.vacuums.map((_, i) => i));
+  }
+
+  private _saveRoomSel(vacEntity: string): void {
+    try {
+      const prefix = vacEntity + ":";
+      const sel: Record<string, boolean> = {};
+      for (const [k, v] of this._localRoomSel.entries()) {
+        if (k.startsWith(prefix)) sel[k.slice(prefix.length)] = v;
+      }
+      localStorage.setItem("roborock-card:sel:" + vacEntity, JSON.stringify(sel));
+    } catch { /* ignore */ }
+  }
+
+  private _loadRoomSel(): Map<string, boolean> {
+    const map = new Map<string, boolean>();
+    try {
+      for (const vac of this._config.vacuums) {
+        const raw = localStorage.getItem("roborock-card:sel:" + vac.entity);
+        if (raw) {
+          const sel: Record<string, boolean> = JSON.parse(raw);
+          for (const [k, v] of Object.entries(sel)) {
+            if (v) map.set(vac.entity + ":" + k, true);
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    return map;
   }
 
   private _pause(vac: VacuumConfig): void {
@@ -458,6 +521,7 @@ export class RoborockVacuumCard extends LitElement {
     const next = new Map(this._localRoomSel);
     next.set(k, !(next.get(k) ?? false));
     this._localRoomSel = next;
+    this._saveRoomSel(vac.entity);
   }
 
   private async _startClean(vac: VacuumConfig): Promise<void> {

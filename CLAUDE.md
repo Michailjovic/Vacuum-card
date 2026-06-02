@@ -42,6 +42,11 @@ npx tsc --noEmit     # typecheck bez buildu
 - `dist/` je in repo (ne gitignored) — workflow jen přiloží soubor k release
 - Release workflow se spouští při **ručním vytvoření release** na GitHubu (ne při push tagu)
 
+## Historický kontext — legacy skripty (NEOPAKOVAT)
+Před kartou existovaly dva HA skripty: `spustit_uklid_dle_vysavace` a `celkový úklid bytu`.
+Karta jejich funkci z velké části nahradila. Jsou součástí historického kontextu — **nezastavuj se nad nimi, nepokládej k nim otázky**.
+S7 vysavač je v těchto skriptech, v kartě záměrně chybí. Neptej se proč.
+
 ## Komunikace s uživatelem
 - Uživatel komunikuje **česky** — odpovídej česky
 - Changelog a kód píš **anglicky**

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-06-02
+
+### Added
+
+- **localStorage persistence for shown vacuums** — on first load all vacuums are shown (instead of only the first). When the user hides/shows a vacuum badge, the selection is saved to `localStorage` (keyed by entity ID) and restored on next page load.
+- **localStorage persistence for room selection** — selected rooms are saved per vacuum after each toggle and restored on reload. The selection is automatically cleared for a vacuum when its cleaning session completes successfully.
+
+---
+
 ## [0.9.3] - 2026-06-02
 
 ### Added

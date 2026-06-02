@@ -87,7 +87,7 @@ const t={ATTRIBUTE:1},e=t=>(...e)=>({_$litDirective$:t,values:e});let i$1 = clas
 
 const CARD_NAME = "roborock-vacuum-card";
 const EDITOR_NAME = "roborock-vacuum-card-editor";
-const CARD_VERSION = "0.9.3";
+const CARD_VERSION = "0.9.4";
 /** Hold duration in ms required to trigger START / PAUSE actions */
 const HOLD_DURATION_MS = 600;
 /**
@@ -194,6 +194,7 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
         /** Auto-calibration: timestamp when vacuum entered each room (key = vacEntity:roomName) */
         this._roomEnterTimes = new Map();
         this._holdTimer = null;
+        this._initialized = false;
         this._holdEnd = () => {
             this._cancelHold();
         };
@@ -221,12 +222,19 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
             throw new Error("[roborock-vacuum-card] 'vacuums' must be a non-empty array");
         }
         this._config = config;
-        const valid = new Set();
-        for (const i of this._shownSet) {
-            if (i < config.vacuums.length)
-                valid.add(i);
+        if (!this._initialized) {
+            this._initialized = true;
+            this._shownSet = this._loadShown();
+            this._localRoomSel = this._loadRoomSel();
         }
-        this._shownSet = valid.size > 0 ? valid : new Set([0]);
+        else {
+            const valid = new Set();
+            for (const i of this._shownSet) {
+                if (i < config.vacuums.length)
+                    valid.add(i);
+            }
+            this._shownSet = valid.size > 0 ? valid : new Set(config.vacuums.map((_, i) => i));
+        }
     }
     getCardSize() {
         return 6;
@@ -466,6 +474,7 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
             next.add(index);
         }
         this._shownSet = next;
+        this._saveShown();
     }
     // ── Service calls ───────────────────────────────────────────────────────
     async _call(domain, service, data) {
@@ -544,6 +553,12 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
                     });
                 }
             }
+            // Clear room selection for this vacuum after successful clean
+            const nextSel = new Map(this._localRoomSel);
+            for (const room of flight.rooms)
+                nextSel.delete(vacEntity + ":" + room.key);
+            this._localRoomSel = nextSel;
+            this._saveRoomSel(vacEntity);
         }
         this._fireHAEvent({
             action: "cleaning_finished",
@@ -556,6 +571,58 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
             actual_mins: actualMins,
             success,
         });
+    }
+    // ── localStorage persistence ──────────────────────────────────────────────
+    _saveShown() {
+        try {
+            const ids = [...this._shownSet].map(i => this._config.vacuums[i]?.entity).filter(Boolean);
+            localStorage.setItem("roborock-card:shown", JSON.stringify(ids));
+        }
+        catch { /* storage unavailable */ }
+    }
+    _loadShown() {
+        try {
+            const raw = localStorage.getItem("roborock-card:shown");
+            if (raw) {
+                const ids = JSON.parse(raw);
+                const indices = ids
+                    .map(id => this._config.vacuums.findIndex(v => v.entity === id))
+                    .filter(i => i >= 0);
+                if (indices.length > 0)
+                    return new Set(indices);
+            }
+        }
+        catch { /* ignore */ }
+        return new Set(this._config.vacuums.map((_, i) => i));
+    }
+    _saveRoomSel(vacEntity) {
+        try {
+            const prefix = vacEntity + ":";
+            const sel = {};
+            for (const [k, v] of this._localRoomSel.entries()) {
+                if (k.startsWith(prefix))
+                    sel[k.slice(prefix.length)] = v;
+            }
+            localStorage.setItem("roborock-card:sel:" + vacEntity, JSON.stringify(sel));
+        }
+        catch { /* ignore */ }
+    }
+    _loadRoomSel() {
+        const map = new Map();
+        try {
+            for (const vac of this._config.vacuums) {
+                const raw = localStorage.getItem("roborock-card:sel:" + vac.entity);
+                if (raw) {
+                    const sel = JSON.parse(raw);
+                    for (const [k, v] of Object.entries(sel)) {
+                        if (v)
+                            map.set(vac.entity + ":" + k, true);
+                    }
+                }
+            }
+        }
+        catch { /* ignore */ }
+        return map;
     }
     _pause(vac) {
         this._call("vacuum", "pause", { entity_id: vac.entity });
@@ -571,6 +638,7 @@ let RoborockVacuumCard = class RoborockVacuumCard extends i$2 {
         const next = new Map(this._localRoomSel);
         next.set(k, !(next.get(k) ?? false));
         this._localRoomSel = next;
+        this._saveRoomSel(vac.entity);
     }
     async _startClean(vac) {
         if (!vac.clean_action)
