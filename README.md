@@ -230,6 +230,37 @@ Use those numbers as `segment_id` in your room config.
 
 ---
 
+## Server-side tracking & notifications (blueprint)
+
+Until 1.0.0 the card tracked running cleanups in the browser: if you closed the
+dashboard mid-clean, last-clean timestamps were never written and no finish
+notification fired. The blueprint tracker moves all of that server-side.
+
+How it works: the card fires a `roborock_card_event` (action `cleaning_started`)
+with the selected rooms **and their helper entity IDs**. A generic blueprint
+automation picks it up, waits for the vacuum to dock, writes each room's
+`input_datetime`, optionally stores the measured duration for single-room runs
+(`single_room_time`), sends start / finish / error notifications and fires
+`cleaning_finished` — which open cards use to clear the room selection on every
+device.
+
+Setup (admin user, ~1 minute):
+
+1. Open the card editor → **Global** tab → **Backend tracking (blueprint)**.
+2. Click **Install blueprint**.
+3. Fill in your notify action (e.g. `notify.mobile_app_phone`), pick which
+   notifications you want, then click **Create automation**.
+4. Optional: use **Create missing helpers for all rooms** in the Vacuums tab to
+   auto-create the `input_datetime` / `input_number` helpers.
+
+Non-admin users can copy the blueprint YAML from the same section and import it
+manually (Settings → Automations → Blueprints), then create an automation from
+it by hand.
+
+Re-deploy the automation from the editor after changing notification settings
+or the single-room calibration toggle. After a card update that bumps the
+blueprint version, the section shows **update available** — one click updates it.
+
 ## Roadmap
 
 | Version | Status | Highlights |

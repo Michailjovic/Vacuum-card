@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-06-11
+
+### Added
+
+- **Server-side cleaning tracker (blueprint)** — a generic automation blueprint that listens for the card's `cleaning_started` event, waits for the vacuum to dock, writes per-room last-clean timestamps (`input_datetime`), optionally calibrates single-room clean times and sends start/finish/error notifications. Runs entirely server-side, so tracking and notifications now work even when no dashboard is open. One static blueprint works for every configuration — the event payload carries the helper entity IDs.
+- **One-click backend deploy** — new *Backend tracking* section in the editor (Global tab): blueprint install/update via `blueprint/save`, automation create/update via the config API, live status of both, plus a manual-install YAML preview with copy button for non-admin users.
+- **Helper auto-creation** — per-room *Create helper* buttons and a bulk *Create missing helpers for all rooms* action create `input_datetime` / `input_number` helpers via WebSocket and write the resulting entity IDs straight into the card config.
+- **Single-room time calibration** (`single_room_time`) — optional: when a run cleaned exactly one room, the measured total duration is written directly into that room's clean-time helper. Applied client-side and passed as a blueprint input on deploy.
+- **Cross-device selection sync** — the card subscribes to `roborock_card_event`; when the blueprint fires `cleaning_finished`, the room selection is cleared on every open dashboard, not just the one that started the clean.
+- **Richer `cleaning_started` event** — payload now includes `last_clean_entities` and `clean_time_entities` (consumed by the blueprint).
+- **Version visible in the GUI** — editor footer shows the running card version; the card itself shows a small version chip in dashboard edit mode.
+
+### Changed
+
+- **Performance** — the card now implements `shouldUpdate` and re-renders only when one of its configured entities actually changed, instead of on every state change in Home Assistant.
+- Switching the clean-action strategy in the editor now carries shared settings (repeat, suction, mop options) over between native variants instead of resetting them.
+- Editor entity fields now accept entity IDs that don't exist yet (committed on change), e.g. helpers you plan to create later.
+- The three native strategy editors were consolidated into one shared renderer (internal cleanup, no behaviour change).
+- Editor default threshold colours now match the card's built-in defaults.
+- `--hold-ms` is set on the card host element instead of `document.documentElement`; `customCards` registration is guarded against double-loading.
+
+### Fixed
+
+- **Area mappings** section in the Global tab was hidden when only `native-auto` was in use, although that strategy consumes the mappings too.
+- **"Effective area"** in the room editor displayed the wrong priority order (`area_mappings` before `room.area_id`); it now mirrors the card's actual resolution order (`room.area_id` → `area_mappings` → `key`).
+- Tapping a vacuum badge now persists the selection to `localStorage` (previously only hold-toggle did).
+- `vacuum.clean_area` failures are caught — the card no longer registers an in-flight cleaning (and later falsely writes timestamps) when the start call failed, and no longer produces an unhandled promise rejection.
+- Pressing **Dock** during a software-repeat run (`native-area`) cancels the remaining passes instead of restarting the vacuum after it docks.
+- Time formatting no longer produces strings like "~1 h 60 min".
+- The editor no longer crashes when opened on a config without a `vacuums` array.
+
+### Deprecated
+
+- Ticker notifications and the generated notification script still work but are superseded by the blueprint tracker, which is now the recommended path.
+
+---
+
 ## [0.9.8] - 2026-06-02
 
 ### Added

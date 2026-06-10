@@ -56,6 +56,8 @@ type InFlightCleaning = {
 @customElement(CARD_NAME)
 export class RoborockVacuumCard extends LitElement {
   @property({ attribute: false }) hass!: HomeAssistant;
+  /** Set by Lovelace when the dashboard is in edit mode */
+  @property({ attribute: false }) editMode = false;
   @state() private _config!: RoborockVacuumCardConfig;
   @state() private _shownSet = new Set<number>([0]);
   /** ID of the button currently being held — drives the fill animation */
@@ -71,6 +73,10 @@ export class RoborockVacuumCard extends LitElement {
 
   private _holdTimer: ReturnType<typeof setTimeout> | null = null;
   private _initialized = false;
+  /** Entities whose state changes should trigger a re-render */
+  private _watched: Set<string> | null = null;
+  /** roborock_card_event subscription (blueprint → card sync) */
+  private _unsubEvents: Promise<() => void> | null = null;
 
   // ── Lovelace card API ───────────────────────────────────────────────────
 
@@ -98,6 +104,7 @@ export class RoborockVacuumCard extends LitElement {
       throw new Error("[roborock-vacuum-card] 'vacuums' must be a non-empty array");
     }
     this._config = config;
+    this._watched = null;
     if (!this._initialized) {
       this._initialized = true;
       this._shownSet = this._loadShown();
@@ -115,12 +122,88 @@ export class RoborockVacuumCard extends LitElement {
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
+  connectedCallback(): void {
+    super.connectedCallback();
+    this.style.setProperty("--hold-ms", HOLD_DURATION_MS + "ms");
+    this._ensureSubscribed();
+  }
+
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this._cancelHold();
+    if (this._unsubEvents) {
+      this._unsubEvents.then((unsub) => unsub()).catch(() => { /* connection gone */ });
+      this._unsubEvents = null;
+    }
+  }
+
+  /**
+   * Re-render only when a relevant entity changed — the hass object is
+   * replaced on every state change anywhere in HA.
+   */
+  protected shouldUpdate(changed: PropertyValues): boolean {
+    if (!changed.has("hass") || changed.size > 1) return true;
+    const old = changed.get("hass") as HomeAssistant | undefined;
+    if (!old || !this._config) return true;
+    for (const id of this._watchedEntities()) {
+      if (old.states[id] !== this.hass.states[id]) return true;
+    }
+    return false;
+  }
+
+  private _watchedEntities(): Set<string> {
+    if (this._watched) return this._watched;
+    const s = new Set<string>();
+    for (const vac of this._config?.vacuums ?? []) {
+      for (const id of [vac.entity, vac.status_entity, vac.battery_entity,
+        vac.last_clean_entity, vac.progress_entity, vac.current_room_entity,
+        vac.error_entity, vac.map?.entity]) {
+        if (id) s.add(id);
+      }
+      for (const r of vac.rooms ?? []) {
+        if (r.last_clean_entity) s.add(r.last_clean_entity);
+        if (r.clean_time_entity) s.add(r.clean_time_entity);
+      }
+    }
+    for (const ga of this._config?.global_actions ?? []) {
+      for (const e of ga.watch_entities ?? []) if (e) s.add(e);
+    }
+    this._watched = s;
+    return s;
+  }
+
+  private _ensureSubscribed(): void {
+    if (this._unsubEvents || !this.hass?.connection?.subscribeEvents) return;
+    try {
+      this._unsubEvents = this.hass.connection.subscribeEvents(
+        (ev) => this._onCardEvent(ev.data ?? {}),
+        "roborock_card_event"
+      );
+    } catch {
+      this._unsubEvents = null;
+    }
+  }
+
+  /**
+   * Blueprint fired cleaning_finished — clear the room selection for that
+   * vacuum on every device with an open dashboard, and drop any stale
+   * in-flight record (e.g. when this tab missed the docked transition).
+   */
+  private _onCardEvent(data: Record<string, unknown>): void {
+    if (data["action"] !== "cleaning_finished" || data["source"] !== "blueprint") return;
+    const vacEntity = String(data["vacuum_entity"] ?? "");
+    if (!this._config?.vacuums.some((v) => v.entity === vacEntity)) return;
+    this._inFlight.delete(vacEntity);
+    const keys = Array.isArray(data["rooms"]) ? (data["rooms"] as unknown[]).map(String) : [];
+    if (!keys.length) return;
+    const next = new Map(this._localRoomSel);
+    for (const k of keys) next.delete(vacEntity + ":" + k);
+    this._localRoomSel = next;
+    this._saveRoomSel(vacEntity);
   }
 
   protected updated(changed: PropertyValues): void {
+    this._ensureSubscribed();
     if (!changed.has("hass") || !this.hass || !this._config) return;
     for (const vac of this._config.vacuums) {
       const newState = this.hass.states[vac.entity]?.state ?? "";
@@ -164,11 +247,6 @@ export class RoborockVacuumCard extends LitElement {
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────
-
-  private _vac(): VacuumConfig {
-    const first = [...this._shownSet][0] ?? 0;
-    return this._config.vacuums[first];
-  }
 
   private _color(vac: VacuumConfig): string {
     return COLOR_HEX[vac.color ?? "green"] ?? COLOR_HEX["green"];
@@ -285,9 +363,14 @@ export class RoborockVacuumCard extends LitElement {
   }
 
   private _timeStr(mins: number): string {
-    if (mins <= 0) return "";
-    if (mins >= 60) return "~" + Math.floor(mins / 60) + " h " + Math.round(mins % 60) + " min";
-    return "~" + Math.round(mins) + " min";
+    const total = Math.round(mins);
+    if (total <= 0) return "";
+    if (total >= 60) {
+      const h = Math.floor(total / 60);
+      const m = total % 60;
+      return m > 0 ? "~" + h + " h " + m + " min" : "~" + h + " h";
+    }
+    return "~" + total + " min";
   }
 
   // ── Global action helpers ───────────────────────────────────────────────
@@ -384,7 +467,7 @@ export class RoborockVacuumCard extends LitElement {
 
   private _fireHAEvent(data: Record<string, unknown>): void {
     try {
-      (this.hass as any).connection.sendMessage({
+      this.hass.connection.sendMessage({
         type: "fire_event",
         event_type: "roborock_card_event",
         event_data: data,
@@ -454,6 +537,8 @@ export class RoborockVacuumCard extends LitElement {
       }
     }
 
+    const totalActualMins = Math.round((Date.now() - flight.originalStartTime) / 60_000);
+
     if (success) {
       const dt = new Date().toISOString().replace("T", " ").slice(0, 19);
       for (const room of flight.rooms) {
@@ -464,14 +549,24 @@ export class RoborockVacuumCard extends LitElement {
           });
         }
       }
+      // Single-room time calibration: a run with exactly one room measures
+      // that room's real total duration (incl. repeat passes) — store it
+      // directly as the new estimate when the option is enabled.
+      if (this._config.single_room_time && flight.rooms.length === 1) {
+        const only = flight.rooms[0];
+        if (only.clean_time_entity && totalActualMins >= 1 && totalActualMins <= 180) {
+          await this._call("input_number", "set_value", {
+            entity_id: only.clean_time_entity,
+            value: totalActualMins,
+          });
+        }
+      }
       // Clear room selection for this vacuum after successful clean
       const nextSel = new Map(this._localRoomSel);
       for (const room of flight.rooms) nextSel.delete(vacEntity + ":" + room.key);
       this._localRoomSel = nextSel;
       this._saveRoomSel(vacEntity);
     }
-
-    const totalActualMins = Math.round((Date.now() - flight.originalStartTime) / 60_000);
     this._fireHAEvent({
       action: "cleaning_finished",
       vacuum_entity: vacEntity,
@@ -582,6 +677,11 @@ export class RoborockVacuumCard extends LitElement {
   }
 
   private _dock(vac: VacuumConfig): void {
+    // Manual dock = user cancelled — never restart remaining software-repeat passes
+    const flight = this._inFlight.get(vac.entity);
+    if (flight && flight.repeatRemaining > 0) {
+      this._inFlight.set(vac.entity, { ...flight, repeatRemaining: 0 });
+    }
     this._call("vacuum", "return_to_base", { entity_id: vac.entity });
   }
 
@@ -642,12 +742,17 @@ export class RoborockVacuumCard extends LitElement {
 
     if (vac.clean_action.type === "native-area") {
       // Uses HA vacuum.clean_area — area_id resolved via area_mappings
-      await this.hass.callService(
-        "vacuum", "clean_area",
-        { cleaning_area_id: selected.map((r) =>
-            r.area_id ?? this._config.area_mappings?.[r.key] ?? r.key) },
-        { entity_id: vac.entity },
-      );
+      try {
+        await this.hass.callService(
+          "vacuum", "clean_area",
+          { cleaning_area_id: selected.map((r) =>
+              r.area_id ?? this._config.area_mappings?.[r.key] ?? r.key) },
+          { entity_id: vac.entity },
+        );
+      } catch (err) {
+        console.error("[roborock-vacuum-card] vacuum.clean_area failed:", err);
+        return; // don't register in-flight for a clean that never started
+      }
     } else if (vac.clean_action.type === "native-auto") {
       // Dynamically resolve segment IDs from roborock.get_maps, then send_command
       const autoAction = vac.clean_action as NativeAutoCleanAction;
@@ -723,6 +828,18 @@ export class RoborockVacuumCard extends LitElement {
       repeatRemaining,
       areaIds,
     });
+    // Call notify_script if configured
+    const nsCfg = this._config.notify_script;
+    if (nsCfg?.entity) {
+      const nsv = nsCfg.vars ?? {};
+      const scriptVars: Record<string, string | number> = { vacuum_entity: vac.entity };
+      if (nsv.vacuum_label   !== false) scriptVars.vacuum_label   = vacLabel;
+      if (nsv.room_labels    !== false) scriptVars.room_labels    = selected.map(r => r.name).join(", ");
+      if (nsv.room_keys      === true ) scriptVars.room_keys      = selected.map(r => r.key).join(", ");
+      if (nsv.estimated_mins !== false) scriptVars.estimated_mins = Math.round(totalMins);
+      if (nsv.clean_type     !== false) scriptVars.clean_type     = this._deriveCleanType(vac);
+      await this._call("script", "turn_on", { entity_id: nsCfg.entity, variables: scriptVars });
+    }
     this._fireHAEvent({
       action: "cleaning_started",
       vacuum_entity: vac.entity,
@@ -731,6 +848,9 @@ export class RoborockVacuumCard extends LitElement {
       rooms: selected.map(r => r.key),
       room_labels: selected.map(r => r.name).join(", "),
       estimated_mins: Math.round(totalMins),
+      // Helper entity IDs — consumed by the cleaning-tracker blueprint
+      last_clean_entities: selected.map(r => r.last_clean_entity).filter((e): e is string => !!e),
+      clean_time_entities: selected.map(r => r.clean_time_entity).filter((e): e is string => !!e),
     });
     await this._sendNotify(this._config.notify?.on_start, {
       vacuum_label: vacLabel,
@@ -782,6 +902,7 @@ export class RoborockVacuumCard extends LitElement {
           if (this._holdTimer !== null) {
             this._cancelHold();
             this._shownSet = new Set([index]);
+            this._saveShown();
           } else {
             this._holdId = null;
           }
@@ -1140,6 +1261,7 @@ export class RoborockVacuumCard extends LitElement {
 
     return html`
       <ha-card>
+        ${this.editMode ? html`<div class="version-chip">v${CARD_VERSION}</div>` : nothing}
         <div class="badges-row">
           ${this._config.vacuums.map((v, i) => this._renderBadge(v, i))}
           ${(this._config.global_actions ?? []).map((ga, i) => this._renderGlobalBadge(ga, i))}
@@ -1158,6 +1280,7 @@ export class RoborockVacuumCard extends LitElement {
 
   static styles = css`
     ha-card {
+      position: relative;
       background: transparent;
       border: none;
       box-shadow: none;
@@ -1165,6 +1288,17 @@ export class RoborockVacuumCard extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 8px;
+    }
+
+    .version-chip {
+      position: absolute;
+      top: 0;
+      right: 8px;
+      font-size: 10px;
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.35);
+      pointer-events: none;
+      z-index: 2;
     }
 
     /* ── Badges ──────────────────────────────────────────────────────── */
@@ -1435,14 +1569,14 @@ export class RoborockVacuumCard extends LitElement {
   `;
 }
 
-// Expose CSS variable for hold duration so CSS animation matches JS timer
-document.documentElement.style.setProperty("--hold-ms", HOLD_DURATION_MS + "ms");
-
-(window as Window & { customCards?: Array<Record<string, unknown>> }).customCards ??= [];
-(window as Window & { customCards?: Array<Record<string, unknown>> }).customCards!.push({
-  type: CARD_NAME,
-  name: "Roborock Vacuum Card",
-  description: "Feature-rich card for Roborock vacuums — map, room selection, multi-vacuum tabs, global actions.",
-  preview: false,
-  documentationURL: "https://github.com/Michailjovic/Vacuum-card",
-});
+const customCards =
+  ((window as Window & { customCards?: Array<Record<string, unknown>> }).customCards ??= []);
+if (!customCards.some((c) => c["type"] === CARD_NAME)) {
+  customCards.push({
+    type: CARD_NAME,
+    name: "Roborock Vacuum Card",
+    description: "Feature-rich card for Roborock vacuums — map, room selection, multi-vacuum tabs, global actions.",
+    preview: false,
+    documentationURL: "https://github.com/Michailjovic/Vacuum-card",
+  });
+}

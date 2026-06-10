@@ -19,8 +19,20 @@ import type {
   RoomThreshold,
   NotifyConfig,
   NotifyTemplates,
+  NotifyScriptConfig,
+  NotifyScriptVars,
+  NotifyScriptEvents,
+  BackendConfig,
 } from "./types";
-import { EDITOR_NAME, COLOR_HEX } from "./const";
+import {
+  EDITOR_NAME,
+  CARD_VERSION,
+  COLOR_HEX,
+  BLUEPRINT_PATH,
+  BLUEPRINT_VERSION,
+  TRACKER_AUTOMATION_ID,
+} from "./const";
+import { BLUEPRINT_YAML } from "./blueprint";
 
 // ── Tab type ─────────────────────────────────────────────────────────────────
 
@@ -47,10 +59,11 @@ const DEFAULT_GLOBAL: GlobalAction = {
   action: { type: "script", entity_id: "" },
 };
 
+/** Must match the card's built-in defaults in _roomBorderColor() */
 const DEFAULT_THRESHOLDS: RoomThreshold[] = [
-  { days: 2, color: "#52c41a" },
+  { days: 2, color: "#2ecc71" },
   { days: 5, color: "#faad14" },
-  { days: 10, color: "#ff4d4f" },
+  { days: 10, color: "#ff9800" },
 ];
 
 // ── Editor ───────────────────────────────────────────────────────────────────
@@ -71,9 +84,18 @@ export class RoborockVacuumCardEditor extends LitElement {
   // Per-vacuum: which roomIdx is open (null = none)
   @state() private _openRoom = new Map<number, number | null>();
 
+  // Script preview state
+  @state() private _scriptPreviewOpen = false;
+
   // Maps tab state
   @state() private _mapVac  = 0;
   @state() private _mapRoom: number | null = null;
+
+  // Backend (blueprint) deploy state
+  @state() private _bpStatus: "unknown" | "missing" | "outdated" | "current" = "unknown";
+  @state() private _bpBusy: string | null = null;
+  @state() private _bpMsg: string | null = null;
+  @state() private _bpYamlOpen = false;
 
   private _initialized = false;
 
@@ -81,7 +103,7 @@ export class RoborockVacuumCardEditor extends LitElement {
     this._config = config;
     if (!this._initialized) {
       this._initialized = true;
-      this._openVac = new Set(config.vacuums.map((_, i) => i));
+      this._openVac = new Set((config.vacuums ?? []).map((_, i) => i));
     }
   }
 
@@ -93,6 +115,10 @@ export class RoborockVacuumCardEditor extends LitElement {
           .map(id => "<option value=\"" + id + "\">")
           .join("");
       }
+    }
+    // Lazy blueprint status fetch when the Global tab is visible
+    if (this.hass && this._tab === "global" && this._bpStatus === "unknown") {
+      this._refreshBlueprintStatus();
     }
   }
 
@@ -161,6 +187,146 @@ export class RoborockVacuumCardEditor extends LitElement {
   private _setNotifyTemplate(event: "on_start" | "on_finish", updates: Partial<NotifyTemplates>): void {
     const existing = this._config.notify?.[event] ?? {};
     this._setNotify({ [event]: { ...existing, ...updates } });
+  }
+
+
+  private _setNotifyScript(updates: Partial<NotifyScriptConfig>): void {
+    const existing = this._config.notify_script ?? { entity: "" };
+    this._setConfig({ notify_script: { ...existing, ...updates } });
+  }
+
+  private _setBackend(updates: Partial<BackendConfig>): void {
+    const existing = this._config.backend ?? {};
+    this._setConfig({ backend: { ...existing, ...updates } });
+  }
+
+  // ── Backend (blueprint) deploy ────────────────────────────────────────────
+
+  /** Entity ID of the deployed tracker automation, or null */
+  private _trackerAutomation(): string | null {
+    for (const [id, st] of Object.entries(this.hass?.states ?? {})) {
+      if (id.startsWith("automation.") && st.attributes["id"] === TRACKER_AUTOMATION_ID) {
+        return id;
+      }
+    }
+    return null;
+  }
+
+  private _bpFetching = false;
+
+  private async _refreshBlueprintStatus(): Promise<void> {
+    if (this._bpFetching) return;
+    this._bpFetching = true;
+    try {
+      const res = await this.hass.callWS<Record<string, any>>({
+        type: "blueprint/list", domain: "automation",
+      });
+      const bp = res?.[BLUEPRINT_PATH];
+      if (!bp) { this._bpStatus = "missing"; return; }
+      const name: string = bp?.metadata?.name ?? bp?.name ?? "";
+      this._bpStatus = name.includes("v" + BLUEPRINT_VERSION) ? "current" : "outdated";
+    } catch (err) {
+      console.error("[editor] blueprint/list failed:", err);
+      this._bpStatus = "missing";
+    } finally {
+      this._bpFetching = false;
+    }
+  }
+
+  private async _installBlueprint(): Promise<void> {
+    this._bpBusy = "blueprint"; this._bpMsg = null;
+    try {
+      await this.hass.callWS({
+        type: "blueprint/save",
+        domain: "automation",
+        path: BLUEPRINT_PATH,
+        yaml: BLUEPRINT_YAML,
+        allow_override: true,
+      });
+      this._bpStatus = "current";
+      this._bpMsg = "✅ Blueprint installed (v" + BLUEPRINT_VERSION + ")";
+    } catch (err: any) {
+      console.error("[editor] blueprint/save failed:", err);
+      this._bpMsg = "❌ Blueprint install failed (admin required?): " + (err?.message ?? err);
+    } finally {
+      this._bpBusy = null;
+    }
+  }
+
+  private async _deployAutomation(): Promise<void> {
+    this._bpBusy = "automation"; this._bpMsg = null;
+    const b: BackendConfig = this._config.backend ?? {};
+    const automation = {
+      alias: "Roborock Vacuum Card — Cleaning Tracker",
+      description: "Managed by roborock-vacuum-card v" + CARD_VERSION + ". Recreate from the card editor (Global tab) after changes.",
+      use_blueprint: {
+        path: BLUEPRINT_PATH,
+        input: {
+          notify_service:   b.notify_service ?? "",
+          notify_on_start:  b.notify_on_start  !== false,
+          notify_on_finish: b.notify_on_finish !== false,
+          notify_on_error:  b.notify_on_error  !== false,
+          single_room_time: this._config.single_room_time === true,
+        },
+      },
+    };
+    try {
+      await this.hass.callApi("post", "config/automation/config/" + TRACKER_AUTOMATION_ID, automation);
+      this._bpMsg = "✅ Automation deployed";
+    } catch (err: any) {
+      console.error("[editor] automation deploy failed:", err);
+      this._bpMsg = "❌ Automation deploy failed (admin required?): " + (err?.message ?? err);
+    } finally {
+      this._bpBusy = null;
+    }
+  }
+
+  // ── Helper auto-creation ──────────────────────────────────────────────────
+
+  private async _createHelper(
+    vacIdx: number, roomIdx: number, kind: "last_clean" | "clean_time"
+  ): Promise<void> {
+    const vac = this._config.vacuums[vacIdx];
+    const room = vac?.rooms?.[roomIdx];
+    if (!vac || !room) return;
+    const vacLabel = vac.name || vac.entity.split(".")[1] || "vacuum";
+    const roomLabel = room.name || room.key || "room " + (roomIdx + 1);
+    try {
+      if (kind === "last_clean") {
+        const res = await this.hass.callWS<{ id: string }>({
+          type: "input_datetime/create",
+          name: vacLabel + " " + roomLabel + " last clean",
+          has_date: true,
+          has_time: true,
+          icon: "mdi:broom",
+        });
+        this._setRoom(vacIdx, roomIdx, { last_clean_entity: "input_datetime." + res.id });
+      } else {
+        const res = await this.hass.callWS<{ id: string }>({
+          type: "input_number/create",
+          name: vacLabel + " " + roomLabel + " clean time",
+          min: 0, max: 180, step: 1,
+          unit_of_measurement: "min",
+          mode: "box",
+          icon: "mdi:timer-outline",
+        });
+        this._setRoom(vacIdx, roomIdx, { clean_time_entity: "input_number." + res.id });
+      }
+    } catch (err: any) {
+      console.error("[editor] helper create failed:", err);
+      this._bpMsg = "❌ Helper creation failed (admin required?): " + (err?.message ?? err);
+    }
+  }
+
+  private async _createMissingHelpers(vacIdx: number): Promise<void> {
+    const count = this._config.vacuums[vacIdx]?.rooms?.length ?? 0;
+    for (let i = 0; i < count; i++) {
+      // re-read on every pass — _setRoom replaces the rooms array
+      let r = this._config.vacuums[vacIdx]?.rooms?.[i];
+      if (r && !r.last_clean_entity) await this._createHelper(vacIdx, i, "last_clean");
+      r = this._config.vacuums[vacIdx]?.rooms?.[i];
+      if (r && !r.clean_time_entity) await this._createHelper(vacIdx, i, "clean_time");
+    }
   }
 
   // ── List mutations ────────────────────────────────────────────────────────
@@ -275,7 +441,8 @@ export class RoborockVacuumCardEditor extends LitElement {
         <input class="text-input" type="text" list=${listId}
           .value=${value ?? ""} placeholder=${ph}
           @input=${(e: Event) => { const v = (e.target as HTMLInputElement).value;
-            if (v === "" || this.hass.states[v]) onChange(v); }} />
+            if (v === "" || this.hass.states[v]) onChange(v); }}
+          @change=${(e: Event) => onChange((e.target as HTMLInputElement).value)} />
       </div>`;
   }
 
@@ -433,6 +600,12 @@ export class RoborockVacuumCardEditor extends LitElement {
             <button class="btn btn--add" @click=${() => this._addRoom(idx)}>
               <ha-icon icon="mdi:plus"></ha-icon> Add room
             </button>
+            ${(vac.rooms ?? []).some(r => !r.last_clean_entity || !r.clean_time_entity) ? html`
+              <button class="btn btn--sm" style="align-self:flex-start"
+                @click=${() => this._createMissingHelpers(idx)}>
+                <ha-icon icon="mdi:auto-fix"></ha-icon> Create missing helpers for all rooms
+              </button>
+            ` : nothing}
 
           </div>
         ` : nothing}
@@ -495,82 +668,43 @@ export class RoborockVacuumCardEditor extends LitElement {
          { value: "native-auto", label: "Native auto (auto-resolve IDs from roborock.get_maps)" },
          { value: "native-area", label: "Native area (vacuum.clean_area)" },
          { value: "script",      label: "Custom script" }],
-        v => this._setVacuum(vacIdx, { clean_action:
-          v === "native"      ? { type: "native" } :
-          v === "native-auto" ? { type: "native-auto" } :
-          v === "native-area" ? { type: "native-area" } :
-                                { type: "script", entity_id: "" } }))}
-      ${action.type === "native"
-        ? this._renderNativeAction(vacIdx, action as NativeCleanAction)
+        v => {
+          if (v === "script") {
+            this._setVacuum(vacIdx, { clean_action: { type: "script", entity_id: "" } });
+            return;
+          }
+          // Carry shared settings over when switching between native variants
+          const prev = this._config.vacuums[vacIdx]?.clean_action;
+          const carry: Record<string, unknown> = {};
+          if (prev && prev.type !== "script") {
+            for (const k of ["repeat", "suction_level", "mop_mode_entity", "mop_mode",
+              "mop_intensity_entity", "mop_intensity"] as const) {
+              const val = (prev as unknown as Record<string, unknown>)[k];
+              if (val !== undefined) carry[k] = val;
+            }
+          }
+          this._setVacuum(vacIdx, { clean_action: { type: v, ...carry } as CleanAction });
+        })}
+      ${action.type === "script"
+        ? this._renderScriptAction(vacIdx, action as ScriptCleanAction)
+        : this._renderNativeOptions(vacIdx,
+            action as NativeCleanAction | NativeAutoCleanAction | NativeAreaCleanAction)}`;
+  }
+
+  /** Shared editor for all three native strategies — only the hint differs */
+  private _renderNativeOptions(
+    vacIdx: number,
+    action: NativeCleanAction | NativeAutoCleanAction | NativeAreaCleanAction
+  ) {
+    const hint =
+      action.type === "native-area"
+        ? html`<p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is implemented in software — the card restarts cleaning after each pass (robot docks between passes).</p>`
         : action.type === "native-auto"
-          ? this._renderNativeAutoAction(vacIdx, action as NativeAutoCleanAction)
-          : action.type === "native-area"
-            ? this._renderNativeAreaAction(vacIdx, action as NativeAreaCleanAction)
-            : this._renderScriptAction(vacIdx, action as ScriptCleanAction)}`;
-  }
-
-  private _renderNativeAction(vacIdx: number, action: NativeCleanAction) {
+          ? html`<p class="hint">Calls <code>roborock.get_maps</code> at clean time, matches rooms via Area mappings (Global tab), then sends <code>vacuum.send_command</code> with <code>app_segment_clean</code>. Supports native repeat. Falls back to <code>segment_id</code> if auto-resolve fails.</p>`
+          : nothing;
     return html`
       <div class="sub-section">
-        ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1,
-          v => this._setCleanAction(vacIdx, { repeat: v }))}
-        <div class="sub-title">Suction level (optional)</div>
-        ${(() => {
-          const speeds: string[] = (this.hass.states[this._config.vacuums[vacIdx]?.entity]
-            ?.attributes["fan_speed_list"] as string[]) ?? [];
-          return speeds.length
-            ? this._optionSelectFromList("Suction option", speeds, action.suction_level,
-                v => this._setCleanAction(vacIdx, { suction_level: v || undefined }))
-            : this._textField("Suction option", action.suction_level,
-                v => this._setCleanAction(vacIdx, { suction_level: v || undefined }), "e.g. balanced");
-        })()}
-        <div class="sub-title">Mop mode (optional)</div>
-        ${this._entityPicker("Mop mode entity", action.mop_mode_entity, ["select"],
-          v => this._setCleanAction(vacIdx, { mop_mode_entity: v || undefined }))}
-        ${action.mop_mode_entity ? this._optionSelect("Mop mode option", action.mop_mode_entity, action.mop_mode,
-          v => this._setCleanAction(vacIdx, { mop_mode: v || undefined })) : nothing}
-        <div class="sub-title">Mop intensity (optional)</div>
-        ${this._entityPicker("Mop intensity entity", action.mop_intensity_entity, ["select"],
-          v => this._setCleanAction(vacIdx, { mop_intensity_entity: v || undefined }))}
-        ${action.mop_intensity_entity ? this._optionSelect("Mop intensity option", action.mop_intensity_entity, action.mop_intensity,
-          v => this._setCleanAction(vacIdx, { mop_intensity: v || undefined })) : nothing}
-      </div>`;
-  }
-
-
-  private _renderNativeAreaAction(vacIdx: number, action: NativeAreaCleanAction) {
-    return html`
-      <div class="sub-section">
-        <p class="hint">Calls <code>vacuum.clean_area</code>. Repeat is implemented in software — the card restarts cleaning after each pass (robot docks between passes).</p>
-        ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1,
-          v => this._setCleanAction(vacIdx, { repeat: v }))}
-        <div class="sub-title">Suction level (optional)</div>
-        ${(() => {
-          const speeds: string[] = (this.hass.states[this._config.vacuums[vacIdx]?.entity]
-            ?.attributes["fan_speed_list"] as string[]) ?? [];
-          return speeds.length
-            ? this._optionSelectFromList("Suction option", speeds, action.suction_level,
-                v => this._setCleanAction(vacIdx, { suction_level: v || undefined }))
-            : this._textField("Suction option", action.suction_level,
-                v => this._setCleanAction(vacIdx, { suction_level: v || undefined }), "e.g. balanced");
-        })()}
-        <div class="sub-title">Mop mode (optional)</div>
-        ${this._entityPicker("Mop mode entity", action.mop_mode_entity, ["select"],
-          v => this._setCleanAction(vacIdx, { mop_mode_entity: v || undefined }))}
-        ${action.mop_mode_entity ? this._optionSelect("Mop mode option", action.mop_mode_entity, action.mop_mode,
-          v => this._setCleanAction(vacIdx, { mop_mode: v || undefined })) : nothing}
-        <div class="sub-title">Mop intensity (optional)</div>
-        ${this._entityPicker("Mop intensity entity", action.mop_intensity_entity, ["select"],
-          v => this._setCleanAction(vacIdx, { mop_intensity_entity: v || undefined }))}
-        ${action.mop_intensity_entity ? this._optionSelect("Mop intensity option", action.mop_intensity_entity, action.mop_intensity,
-          v => this._setCleanAction(vacIdx, { mop_intensity: v || undefined })) : nothing}
-      </div>`;
-  }
-
-  private _renderNativeAutoAction(vacIdx: number, action: NativeAutoCleanAction) {
-    return html`
-      <div class="sub-section">
-        <p class="hint">Calls <code>roborock.get_maps</code> at clean time, matches rooms via Area mappings (Global tab), then sends <code>vacuum.send_command</code> with <code>app_segment_clean</code>. Supports native repeat. Falls back to <code>segment_id</code> if auto-resolve fails.</p>
+        ${hint}
         ${this._numberSlider("Repeat passes", action.repeat ?? 1, 1, 3, 1,
           v => this._setCleanAction(vacIdx, { repeat: v }))}
         <div class="sub-title">Suction level (optional)</div>
@@ -603,7 +737,7 @@ export class RoborockVacuumCardEditor extends LitElement {
       <div class="sub-section">
         ${this._entityPicker("Script entity", action.entity_id, ["script"],
           v => this._setCleanAction(vacIdx, { entity_id: v }))}
-        <p class="hint">Tokens: {{ entity }}, {{ selected_segments }}, {{ selected_room_keys }}</p>
+        <p class="hint">Tokens: {{ entity }}, {{ selected_segments }}, {{ selected_room_keys }}, {{ selected_area_ids }}</p>
         ${entries.map(([key, val], vi) => html`
           <div class="var-row">
             <input class="text-input text-input--half" .value=${key} placeholder="name"
@@ -662,7 +796,8 @@ export class RoborockVacuumCardEditor extends LitElement {
                 <div class="field field--row">
                   <label>Effective area</label>
                   <strong style="font-size:13px">${
-                    this._config.area_mappings?.[room.key] ?? room.area_id ?? room.key
+                    /* must mirror the card's resolution order */
+                    room.area_id ?? this._config.area_mappings?.[room.key] ?? room.key
                   }</strong>
                 </div>
                 <p class="hint map-hint" @click=${() => { this._tab = "global"; }}>
@@ -685,9 +820,20 @@ export class RoborockVacuumCardEditor extends LitElement {
               v => this._setRoom(vacIdx, roomIdx, { clean_time_entity: v || undefined }))}
             ${room.clean_time_entity ? html`
               <p class="hint">Card measures actual room time and writes rolling average here automatically.</p>
-            ` : nothing}
+            ` : html`
+              <button class="btn btn--add btn--sm" style="align-self:flex-start"
+                @click=${() => this._createHelper(vacIdx, roomIdx, "clean_time")}>
+                <ha-icon icon="mdi:plus"></ha-icon> Create input_number helper
+              </button>
+            `}
             ${this._entityPicker("Last clean (input_datetime)", room.last_clean_entity, ["input_datetime"],
               v => this._setRoom(vacIdx, roomIdx, { last_clean_entity: v || undefined }))}
+            ${!room.last_clean_entity ? html`
+              <button class="btn btn--add btn--sm" style="align-self:flex-start"
+                @click=${() => this._createHelper(vacIdx, roomIdx, "last_clean")}>
+                <ha-icon icon="mdi:plus"></ha-icon> Create input_datetime helper
+              </button>
+            ` : nothing}
             ${room.last_clean_entity ? html`
               <button class="btn btn--sm" style="align-self:flex-start"
                 @click=${() => this._logCleanNow(room.last_clean_entity!)}>
@@ -834,6 +980,155 @@ export class RoborockVacuumCardEditor extends LitElement {
       </div>`;
   }
 
+  // ── Script YAML generator ───────────────────────────────────────────────────
+
+  private _generateNotifyScriptYaml(): string {
+    const cfg = this._config.notify_script;
+    if (!cfg?.entity) return "";
+    const v: NotifyScriptVars   = cfg.vars       ?? {};
+    const e: NotifyScriptEvents = cfg.gen_events ?? {};
+
+    const hasStart  = e.on_start  !== false;
+    const hasFinish = e.on_finish !== false;
+    const hasError  = e.on_error  !== false;
+    const inclLabel = v.vacuum_label   !== false;
+    const inclRooms = v.room_labels    !== false;
+    const inclKeys  = v.room_keys      === true;
+    const inclMins  = v.estimated_mins !== false;
+    const inclType  = v.clean_type     !== false;
+
+    const lines: string[] = [];
+    const L = (s: string) => lines.push(s);
+    const scriptName = cfg.entity.startsWith("script.") ? cfg.entity.slice(7) : cfg.entity;
+
+    L(`alias: ${scriptName}`);
+    L(`description: Generováno z roborock-vacuum-card`);
+    L(`mode: parallel`);
+    L(`max: 3`);
+    L(`fields:`);
+    L(`  vacuum_entity:`);
+    L(`    required: true`);
+    L(`    description: "Vysavač entity ID"`);
+    if (inclLabel) { L(`  vacuum_label:`);   L(`    required: true`); }
+    if (inclRooms) { L(`  room_labels:`);    L(`    required: true`); }
+    if (inclKeys)  { L(`  room_keys:`);      L(`    required: false`); }
+    if (inclMins)  { L(`  estimated_mins:`); L(`    required: true`); }
+    if (inclType)  { L(`  clean_type:`);     L(`    required: true`); }
+
+    L(`sequence:`);
+    L(`  - variables:`);
+    L(`      vac_id: "{{ vacuum_entity.split('.')[1] }}"`);
+    if (inclType) {
+      L(`      is_wet: "{{ clean_type == 'wet' }}"`);
+      L(`      emoji: "{{ '\u{1FAE7}' if is_wet else '\u{1F9F9}' }}"`);
+      L(`      clean_word: "{{ 'mopování' if is_wet else 'úklid' }}"`);
+    }
+
+    if (hasStart) {
+      const title = (inclType ? "{{ emoji }} " : "") +
+                    (inclLabel ? "{{ vacuum_label }}" : "Vysavač") +
+                    (inclType ? " – {{ clean_word }} zahájen" : " – úklid zahájen");
+      const msgParts = [
+        ...(inclRooms ? ["{{ room_labels }}"] : []),
+        ...(inclMins  ? ["(~{{ estimated_mins }} min)"] : []),
+      ];
+      L(``);
+      L(`  # --- Zahájení ---`);
+      L(`  - action: notify.notify  # TODO: nahraď svým notify service`);
+      L(`    data:`);
+      L(`      title: "${title}"`);
+      L(`      message: "${msgParts.join(" ")}"`);
+    }
+
+    if (hasFinish || hasError) {
+      L(``);
+      L(`  # --- Čekání na výsledek ---`);
+      L(`  - wait_for_trigger:`);
+      if (hasFinish) {
+        L(`      - trigger: state`);
+        L(`        entity_id: "{{ vacuum_entity }}"`);
+        L(`        to:`);
+        L(`          - docked`);
+        L(`          - charging`);
+        L(`        for:`);
+        L(`          minutes: 1`);
+      }
+      if (hasError) {
+        L(`      - trigger: state`);
+        L(`        entity_id: "{{ vacuum_entity }}"`);
+        L(`        to: error`);
+      }
+      L(`    timeout:`);
+      L(`      hours: 4`);
+      L(`    continue_on_timeout: false`);
+      L(``);
+      L(`  - variables:`);
+      L(`      final_state: "{{ wait.trigger.to_state.state if wait.trigger is not none else 'timeout' }}"`);
+      if (hasFinish) {
+        L(`      begin_ts: "{{ states('sensor.' ~ vac_id ~ '_last_clean_begin') }}"`);
+        L(`      end_ts: "{{ states('sensor.' ~ vac_id ~ '_last_clean_end') }}"`);
+        L(`      actual_minutes: >-`);
+        L(`        {% if begin_ts not in ['unknown','unavailable'] and end_ts not in ['unknown','unavailable'] %}`);
+        L(`          {{ (((end_ts | as_datetime) - (begin_ts | as_datetime)).total_seconds() / 60) | round(0) }}`);
+        L(`        {% else %}`);
+        L(`          0`);
+        L(`        {% endif %}`);
+      }
+
+      const labelPart   = inclLabel ? "{{ vacuum_label }}" : "Vysavač";
+      const finishTitle = (inclType ? "{{ emoji }} " : "") + labelPart +
+                          (inclType ? " – {{ clean_word }} dokončen" : " – úklid dokončen");
+      const finishMsg   = [
+        ...(inclRooms ? ["{{ room_labels }}"] : []),
+        "Trvalo to {{ actual_minutes }} min.",
+      ].join(" ");
+
+      if (hasFinish && hasError) {
+        L(``);
+        L(`  - choose:`);
+        L(`      - conditions:`);
+        L(`          - condition: template`);
+        L(`            value_template: "{{ final_state == 'error' }}"`);
+        L(`        sequence:`);
+        L(`          - variables:`);
+        L(`              current_room: "{{ states('sensor.' ~ vac_id ~ '_current_room') }}"`);
+        L(`          - action: notify.notify  # TODO`);
+        L(`            data:`);
+        L(`              title: "⚠️ ${labelPart} – problém"`);
+        L(`              message: "Místnost: {{ current_room }}. Zkontroluj vysavač."`);
+        L(`      - conditions:`);
+        L(`          - condition: template`);
+        L(`            value_template: "{{ final_state in ['docked', 'charging'] }}"`);
+        L(`        sequence:`);
+        L(`          - action: notify.notify  # TODO`);
+        L(`            data:`);
+        L(`              title: "${finishTitle}"`);
+        L(`              message: "${finishMsg}"`);
+      } else if (hasError) {
+        L(``);
+        L(`  - condition: template`);
+        L(`    value_template: "{{ final_state == 'error' }}"`);
+        L(`  - variables:`);
+        L(`      current_room: "{{ states('sensor.' ~ vac_id ~ '_current_room') }}"`);
+        L(`  - action: notify.notify  # TODO`);
+        L(`    data:`);
+        L(`      title: "⚠️ ${labelPart} – problém"`);
+        L(`      message: "Místnost: {{ current_room }}. Zkontroluj vysavač."`);
+      } else if (hasFinish) {
+        L(``);
+        L(`  - condition: template`);
+        L(`    value_template: "{{ final_state in ['docked', 'charging'] }}"`);
+        L(`  - action: notify.notify  # TODO`);
+        L(`    data:`);
+        L(`      title: "${finishTitle}"`);
+        L(`      message: "${finishMsg}"`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+
   // ── Tab: Global ───────────────────────────────────────────────────────────
 
   private _renderGlobalTab() {
@@ -912,7 +1207,8 @@ export class RoborockVacuumCardEditor extends LitElement {
           const START_TOKENS = '{{ vacuum_label }}, {{ room_labels }}, {{ room_keys }}, {{ estimated_mins }}, {{ clean_type }}';
           const FINISH_TOKENS = START_TOKENS + ', {{ actual_mins }}, {{ success }}';
           return html`
-            <div class="section-title" style="margin-top:4px">Notifications (Ticker)</div>
+            <div class="section-title" style="margin-top:4px">Notifications (Ticker) — legacy</div>
+            <p class="hint">Browser-side; consider the blueprint tracker below instead.</p>
             <div class="field field--row">
               <label>Enable</label>
               <label class="toggle-wrap">
@@ -960,15 +1256,119 @@ export class RoborockVacuumCardEditor extends LitElement {
         })()}
 
         ${(() => {
-          const hasNativeArea = this._config.vacuums.some(v => v.clean_action?.type === "native-area");
-          if (!hasNativeArea) return nothing;
+          const nsCfg  = this._config.notify_script;
+          const nsVars: NotifyScriptVars   = nsCfg?.vars       ?? {};
+          const nsEvts: NotifyScriptEvents = nsCfg?.gen_events ?? {};
+          type VarKey = keyof NotifyScriptVars;
+          type EvtKey = keyof NotifyScriptEvents;
+          const VAR_DEFS: Array<[VarKey, string, boolean]> = [
+            ["vacuum_label",   "Název vysavače",       true],
+            ["room_labels",    "Místnosti (text)",      true],
+            ["room_keys",      "Místnosti (klíče)",     false],
+            ["estimated_mins", "Odhadovaný čas",        true],
+            ["clean_type",     "Typ úklidu (wet/dry)",  true],
+          ];
+          const EVT_DEFS: Array<[EvtKey, string]> = [
+            ["on_start",  "Zahájení úklidu"],
+            ["on_finish", "Dokončení úklidu"],
+            ["on_error",  "Chyba / problém"],
+          ];
+          return html`
+            <div class="section-title" style="margin-top:4px">Script notifikací</div>
+            <p class="hint">
+              Karta při startu úklidu zavolá HA skript a předá mu vybraný kontext.
+              Skript pak běží server-side &mdash; nezávisle na otevřeném dashboardu.
+            </p>
+            <div class="field field--row">
+              <label>Povolit</label>
+              <label class="toggle-wrap">
+                <input type="checkbox" class="toggle-input"
+                  .checked=${!!nsCfg}
+                  @change=${(e: Event) => {
+                    if ((e.target as HTMLInputElement).checked) {
+                      this._setConfig({ notify_script: { entity: "script.vakuum_notifikace_uklid" } });
+                    } else {
+                      this._setConfig({ notify_script: undefined });
+                      this._scriptPreviewOpen = false;
+                    }
+                  }} />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+            ${nsCfg ? html`
+              ${this._textField("Script entity", nsCfg.entity,
+                v => this._setNotifyScript({ entity: v }), "script.vakuum_notifikace_uklid")}
+
+              <div class="sub-title">Události v generovaném skriptu</div>
+              ${EVT_DEFS.map(([key, label]) => {
+                const checked = nsEvts[key] !== false;
+                return html`
+                  <div class="field field--row">
+                    <label>${label}</label>
+                    <label class="toggle-wrap">
+                      <input type="checkbox" class="toggle-input"
+                        .checked=${checked}
+                        @change=${(e: Event) => {
+                          const val = (e.target as HTMLInputElement).checked;
+                          this._setNotifyScript({ gen_events: { ...nsEvts, [key]: val } });
+                        }} />
+                      <span class="toggle-track"></span>
+                    </label>
+                  </div>`;
+              })}
+
+              <div class="sub-title">Proměnné předávané skriptu</div>
+              ${VAR_DEFS.map(([key, label, defaultOn]) => {
+                const checked = defaultOn ? nsVars[key] !== false : nsVars[key] === true;
+                return html`
+                  <div class="field field--row">
+                    <label>${label} <code style="font-size:10px">${key}</code></label>
+                    <label class="toggle-wrap">
+                      <input type="checkbox" class="toggle-input"
+                        .checked=${checked}
+                        @change=${(e: Event) => {
+                          const val = (e.target as HTMLInputElement).checked;
+                          this._setNotifyScript({ vars: { ...nsVars, [key]: val } });
+                        }} />
+                      <span class="toggle-track"></span>
+                    </label>
+                  </div>`;
+              })}
+
+              <button class="btn btn--sm" style="align-self:flex-start"
+                @click=${() => { this._scriptPreviewOpen = !this._scriptPreviewOpen; }}>
+                <ha-icon icon=${this._scriptPreviewOpen ? "mdi:code-tags-check" : "mdi:code-tags"}></ha-icon>
+                ${this._scriptPreviewOpen ? "Skrýt generovaný skript" : "Zobrazit generovaný skript"}
+              </button>
+              ${this._scriptPreviewOpen ? html`
+                <div style="position:relative">
+                  <pre class="yaml-preview">${this._generateNotifyScriptYaml()}</pre>
+                  <button class="btn btn--sm" style="position:absolute;top:6px;right:6px"
+                    @click=${async () => {
+                      try { await navigator.clipboard.writeText(this._generateNotifyScriptYaml()); }
+                      catch { /* clipboard unavailable */ }
+                    }}>
+                    <ha-icon icon="mdi:content-copy"></ha-icon> Kopírovat
+                  </button>
+                </div>
+              ` : nothing}
+            ` : nothing}
+          `;
+        })()}
+
+        ${this._renderBackendSection()}
+
+        ${(() => {
+          const usesAreaMappings = this._config.vacuums.some(v =>
+            v.clean_action?.type === "native-area" || v.clean_action?.type === "native-auto");
+          if (!usesAreaMappings) return nothing;
           const allKeys = [...new Set(
             this._config.vacuums.flatMap(v => (v.rooms ?? []).map(r => r.key)).filter(Boolean)
           )].sort();
           const mappings = this._config.area_mappings ?? {};
           return html`
             <div class="section-title" style="margin-top:4px">Area mappings</div>
-            <p class="hint">Maps room keys to HA areas for <strong>native-area</strong> strategy. Set once here — applies to all vacuums.</p>
+            <p class="hint">Maps room keys to HA areas for the <strong>native-area</strong> and <strong>native-auto</strong> strategies. Set once here — applies to all vacuums.</p>
             ${allKeys.length === 0
               ? html`<p class="hint">No rooms configured yet.</p>`
               : allKeys.map(key => this._areaPicker(key, mappings[key], v => {
@@ -980,6 +1380,112 @@ export class RoborockVacuumCardEditor extends LitElement {
         })()}
 
       </div>`;
+  }
+
+  // ── Backend tracking section ──────────────────────────────────────────────
+
+  private _renderBackendSection() {
+    const b: BackendConfig = this._config.backend ?? {};
+    const automationEntity = this._trackerAutomation();
+    const bpLabel =
+      this._bpStatus === "unknown"  ? "⏳ checking…" :
+      this._bpStatus === "current"  ? "✅ installed (v" + BLUEPRINT_VERSION + ")" :
+      this._bpStatus === "outdated" ? "⚠️ installed — update available (v" + BLUEPRINT_VERSION + ")" :
+                                      "❌ not installed";
+    return html`
+      <div class="section-title" style="margin-top:4px">Backend tracking (blueprint)</div>
+      <p class="hint">
+        Server-side cleaning tracker: a blueprint automation listens for the card's
+        <code>cleaning_started</code> event, waits for the vacuum to dock, writes per-room
+        last-clean timestamps and sends notifications — it works even when no dashboard
+        is open. Recommended over the Ticker/script notifications above.
+      </p>
+
+      <div class="field field--row">
+        <label>Blueprint</label>
+        <span style="font-size:13px">${bpLabel}</span>
+      </div>
+      <div class="field field--row">
+        <label>Automation</label>
+        <span style="font-size:13px">${automationEntity
+          ? html`✅ <code>${automationEntity}</code>`
+          : "❌ not created"}</span>
+      </div>
+
+      ${this._textField("Notify action", b.notify_service,
+        v => this._setBackend({ notify_service: v || undefined }), "notify.mobile_app_phone")}
+      ${([
+        ["notify_on_start",  "Notify on start"],
+        ["notify_on_finish", "Notify on finish"],
+        ["notify_on_error",  "Notify on error"],
+      ] as Array<[keyof BackendConfig, string]>).map(([key, label]) => html`
+        <div class="field field--row">
+          <label>${label}</label>
+          <label class="toggle-wrap">
+            <input type="checkbox" class="toggle-input"
+              .checked=${b[key] !== false}
+              @change=${(e: Event) =>
+                this._setBackend({ [key]: (e.target as HTMLInputElement).checked })} />
+            <span class="toggle-track"></span>
+          </label>
+        </div>`)}
+      <div class="field field--row">
+        <label>Single-room calibration</label>
+        <label class="toggle-wrap">
+          <input type="checkbox" class="toggle-input"
+            .checked=${this._config.single_room_time ?? false}
+            @change=${(e: Event) => this._setConfig({
+              single_room_time: (e.target as HTMLInputElement).checked || undefined })} />
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <p class="hint">
+        Single-room calibration: when a run cleaned exactly one room, the measured duration
+        is written into that room's clean-time helper. Applied by the card and by the
+        blueprint (re-deploy the automation after changing).
+      </p>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn--add btn--sm" ?disabled=${this._bpBusy !== null}
+          @click=${() => this._installBlueprint()}>
+          <ha-icon icon="mdi:download"></ha-icon>
+          ${this._bpBusy === "blueprint" ? "Installing…"
+            : this._bpStatus === "current" ? "Reinstall blueprint"
+            : this._bpStatus === "outdated" ? "Update blueprint"
+            : "Install blueprint"}
+        </button>
+        <button class="btn btn--add btn--sm"
+          ?disabled=${this._bpBusy !== null || this._bpStatus === "missing"}
+          @click=${() => this._deployAutomation()}>
+          <ha-icon icon="mdi:robot"></ha-icon>
+          ${this._bpBusy === "automation" ? "Deploying…"
+            : automationEntity ? "Update automation" : "Create automation"}
+        </button>
+        <button class="btn btn--sm" ?disabled=${this._bpBusy !== null}
+          @click=${() => { this._bpStatus = "unknown"; this._bpMsg = null; }}>
+          <ha-icon icon="mdi:refresh"></ha-icon> Refresh
+        </button>
+      </div>
+      ${this._bpMsg ? html`<p class="hint">${this._bpMsg}</p>` : nothing}
+
+      <button class="btn btn--sm" style="align-self:flex-start"
+        @click=${() => { this._bpYamlOpen = !this._bpYamlOpen; }}>
+        <ha-icon icon=${this._bpYamlOpen ? "mdi:code-tags-check" : "mdi:code-tags"}></ha-icon>
+        ${this._bpYamlOpen ? "Hide blueprint YAML" : "Show blueprint YAML (manual install)"}
+      </button>
+      ${this._bpYamlOpen ? html`
+        <div style="position:relative">
+          <pre class="yaml-preview">${BLUEPRINT_YAML}</pre>
+          <button class="btn btn--sm" style="position:absolute;top:6px;right:6px"
+            @click=${async () => {
+              try { await navigator.clipboard.writeText(BLUEPRINT_YAML); }
+              catch { /* clipboard unavailable */ }
+            }}>
+            <ha-icon icon="mdi:content-copy"></ha-icon> Copy
+          </button>
+        </div>
+      ` : nothing}
+    `;
   }
 
   private _renderGlobalAccordion(ga: GlobalAction, idx: number) {
@@ -1066,6 +1572,7 @@ export class RoborockVacuumCardEditor extends LitElement {
         ${this._tab === "vacuums" ? this._renderVacuumsTab()
           : this._tab === "maps"    ? this._renderMapsTab()
           : this._renderGlobalTab()}
+        <div class="editor-footer">roborock-vacuum-card v${CARD_VERSION}</div>
       </div>`;
   }
 
@@ -1091,6 +1598,20 @@ export class RoborockVacuumCardEditor extends LitElement {
 
     /* ── Tab body ── */
     .tab-body { display:flex; flex-direction:column; gap:8px; padding:10px 0 4px; }
+
+    /* ── YAML preview ── */
+    .yaml-preview {
+      background:var(--code-editor-background-color,#1e1e1e);
+      color:var(--code-editor-foreground-color,#d4d4d4);
+      padding:12px;
+      border-radius:6px;
+      font-size:11px;
+      line-height:1.6;
+      overflow-x:auto;
+      white-space:pre;
+      margin:0;
+      font-family:monospace;
+    }
 
     /* ── Vacuum accordion ── */
     .acc-row {
@@ -1275,6 +1796,13 @@ export class RoborockVacuumCardEditor extends LitElement {
 
     /* ── Misc ── */
     .hint { font-size:12px; color:var(--secondary-text-color); margin:0; }
+
+    .editor-footer {
+      margin-top:8px; padding-top:6px;
+      border-top:1px solid var(--divider-color,rgba(0,0,0,.12));
+      font-size:11px; text-align:right;
+      color:var(--secondary-text-color); opacity:.7;
+    }
 
     .var-row { display:flex; align-items:center; gap:6px; }
     .var-sep { color:var(--secondary-text-color); flex-shrink:0; }

@@ -1,6 +1,11 @@
 export const CARD_NAME = "roborock-vacuum-card";
 export const EDITOR_NAME = "roborock-vacuum-card-editor";
-export const CARD_VERSION = "0.9.8";
+export const CARD_VERSION = "1.0.0";
+
+/** Server-side tracking blueprint */
+export const BLUEPRINT_VERSION = "1.0.0";
+export const BLUEPRINT_PATH = "roborock_vacuum_card/cleaning_tracker.yaml";
+export const TRACKER_AUTOMATION_ID = "roborock_card_cleaning_tracker";
 
 /** Hold duration in ms required to trigger START / PAUSE actions */
 export const HOLD_DURATION_MS = 600;

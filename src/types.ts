@@ -1,13 +1,26 @@
 // ── Home Assistant core types ─────────────────────────────────────────────
 
+export interface HassConnection {
+  sendMessage(message: Record<string, unknown>): void;
+  subscribeEvents(
+    callback: (event: { data?: Record<string, unknown> }) => void,
+    eventType?: string
+  ): Promise<() => void>;
+}
+
 export interface HomeAssistant {
   states: Record<string, HassEntity>;
+  connection: HassConnection;
   callService(
     domain: string,
     service: string,
     data?: Record<string, unknown>,
     target?: Record<string, unknown>
   ): Promise<void>;
+  /** Raw WebSocket command (blueprint/save, input_datetime/create, …) */
+  callWS<T = unknown>(message: Record<string, unknown>): Promise<T>;
+  /** REST API call (config/automation/config/<id>, …) */
+  callApi<T = unknown>(method: string, path: string, parameters?: unknown): Promise<T>;
   hassUrl(path?: string): string;
 }
 
@@ -65,11 +78,12 @@ export interface NativeCleanAction {
 /**
  * Uses the newer HA vacuum.clean_area action.
  * room.key is sent directly as cleaning_area_id -- no segment_id needed.
- * Repeat is not supported by vacuum.clean_area.
+ * Repeat is implemented in software: the card restarts cleaning after each
+ * pass (the integration does not accept a times/repeat parameter).
  */
 export interface NativeAreaCleanAction {
   type: "native-area";
-  repeat?: number;         // passed as times: N in vacuum.clean_area data
+  repeat?: number;         // software repeat -- card restarts after each pass
   suction_level?: string;
   mop_mode_entity?: string;
   mop_mode?: string;
@@ -178,6 +192,49 @@ export interface NotifyConfig {
   on_finish?: NotifyTemplates;
 }
 
+export interface NotifyScriptVars {
+  /** Pass vacuum_label to script (default true) */
+  vacuum_label?: boolean;
+  /** Pass room_labels — comma-separated display names (default true) */
+  room_labels?: boolean;
+  /** Pass room_keys — comma-separated room keys (default false) */
+  room_keys?: boolean;
+  /** Pass estimated_mins — total expected clean time (default true) */
+  estimated_mins?: boolean;
+  /** Pass clean_type — "wet" or "dry" (default true) */
+  clean_type?: boolean;
+}
+
+export interface NotifyScriptEvents {
+  /** Generate on_start notification block in script (default true) */
+  on_start?: boolean;
+  /** Generate on_finish notification block in script (default true) */
+  on_finish?: boolean;
+  /** Generate on_error notification block in script (default true) */
+  on_error?: boolean;
+}
+
+export interface NotifyScriptConfig {
+  /** Script entity ID to call when cleaning starts */
+  entity: string;
+  /** Which variables to pass to the script */
+  vars?: NotifyScriptVars;
+  /** Which event blocks to include in the generated script YAML */
+  gen_events?: NotifyScriptEvents;
+}
+
+/**
+ * Settings for the server-side tracking blueprint deploy.
+ * Stored in the card config so the editor can (re)create the automation.
+ */
+export interface BackendConfig {
+  /** Notify action, e.g. "notify.mobile_app_phone". Empty = no notifications. */
+  notify_service?: string;
+  notify_on_start?: boolean;   // default true
+  notify_on_finish?: boolean;  // default true
+  notify_on_error?: boolean;   // default true
+}
+
 export interface RoborockVacuumCardConfig {
   type: string;
   vacuums: VacuumConfig[];
@@ -196,4 +253,14 @@ export interface RoborockVacuumCardConfig {
   area_mappings?: Record<string, string>;
   /** Ticker notification config */
   notify?: NotifyConfig;
+  /** Script-based notification config */
+  notify_script?: NotifyScriptConfig;
+  /**
+   * When a run cleaned exactly one room, write the measured duration
+   * directly into that room's clean_time_entity (input_number).
+   * Applied client-side and passed as a blueprint input on deploy.
+   */
+  single_room_time?: boolean;
+  /** Server-side tracking blueprint deploy settings */
+  backend?: BackendConfig;
 }
