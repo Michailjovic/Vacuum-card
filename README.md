@@ -268,7 +268,13 @@ blueprint version, the section shows **update available** — one click updates 
 | v0.1.0 | ✅ Released | Core card, YAML editor |
 | v0.2.0 | ✅ Released | Full GUI editor, map calibration, click-to-position rooms |
 | v0.3.0 | ✅ Released | Hold animation, global action badges, room icons in START button |
-| v0.4.0 | Planned | Per-room cleaning history chart; drag-to-reorder rooms; `roborock.get_maps` auto-import |
+| v0.9.x | ✅ Released | Clean strategies (native / native-auto / native-area), auto-calibration, notifications |
+| v1.0.0 | ✅ Released | Server-side tracking blueprint, one-click deploy, helper auto-creation, single-room calibration |
+| v1.1.0 | Planned | Multi-vacuum session aggregation (one "whole flat" notification via session_id), blueprint-side per-room calibration (current_room trigger), rectangle overlay preview in the Maps tab, configurable map aspect ratio, `getGridOptions` for sections layout |
+| v1.2.0 | Planned | Theme support (CSS variables, light-theme friendly), localization (en/cs), keyboard accessibility + touch-action, live robot position on the map, consumables row (filter/brushes/mop) with dock actions (empty bin, wash/dry mop) |
+| v1.3.0 | Planned | Per-room cleaning statistics from long-term statistics (history sparkline, cleaning log) |
+| v2.0.0 | Ideas | Interactive map: zone cleaning by drawing, pin & go, multi-floor support, per-room suction/mop overrides; Valetudo strategy for non-cloud vacuums |
+| Ongoing | — | Tooling: ESLint, hassfest/HACS validation CI, unit tests for extracted utils |
 
 ---
 
